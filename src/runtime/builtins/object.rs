@@ -273,6 +273,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn get_own_property_descriptor_for_builtin_method() {
+        let mut heap = Heap::new();
+        let obj_id = heap.alloc_object();
+        let map_id = crate::runtime::builtins::resolve("Array", "map").expect("map");
+        heap.set_prop(obj_id, "map", Value::Builtin(map_id));
+        let descriptor = get_own_property_descriptor(
+            &[Value::Object(obj_id), Value::String("map".to_string())],
+            &mut heap,
+        );
+        let descriptor_id = match descriptor {
+            Value::Object(id) => id,
+            other => panic!("expected descriptor object, got {:?}", other),
+        };
+        assert_eq!(
+            heap.get_prop(descriptor_id, "value"),
+            Value::Builtin(map_id),
+            "descriptor.value must be the callable builtin"
+        );
+    }
+
+    #[test]
     fn get_own_property_descriptor_for_function_name() {
         let mut heap = Heap::new();
         heap.set_function_prop(0, "name", Value::String("fn".to_string()));

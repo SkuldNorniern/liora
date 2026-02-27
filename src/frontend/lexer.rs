@@ -117,85 +117,165 @@ impl Lexer<'_> {
         Token::new(token_type, lexeme, span)
     }
 
+    fn consume_digits_with_separators<F>(
+        &mut self,
+        lexeme: &mut String,
+        raw_for_span: &mut String,
+        is_valid: F,
+    ) -> Option<String>
+    where
+        F: Fn(char) -> bool,
+    {
+        while let Some(ch) = self.current_char {
+            if is_valid(ch) {
+                lexeme.push(ch);
+                raw_for_span.push(ch);
+                self.advance();
+            } else if ch == '_' {
+                let peek_ok = self.peek().map_or(false, |n| is_valid(n));
+                if !peek_ok {
+                    raw_for_span.push(ch);
+                    self.advance();
+                    while let Some(c) = self.current_char {
+                        if c == '_' || is_valid(c) {
+                            raw_for_span.push(c);
+                            self.advance();
+                        } else {
+                            break;
+                        }
+                    }
+                    return Some(raw_for_span.clone());
+                }
+                raw_for_span.push(ch);
+                self.advance();
+            } else {
+                break;
+            }
+        }
+        None
+    }
+
     fn scan_number(&mut self) -> Token {
         let start_pos = self.position;
         let mut lexeme = String::new();
+        let mut raw_for_span = String::new();
 
         if self.current_char == Some('0') {
             lexeme.push('0');
+            raw_for_span.push('0');
             self.advance();
 
             if let Some(ch) = self.current_char {
                 match ch {
                     'x' | 'X' => {
                         lexeme.push(ch);
+                        raw_for_span.push(ch);
                         self.advance();
-                        while let Some(ch) = self.current_char {
-                            if ch.is_ascii_hexdigit() {
-                                lexeme.push(ch);
-                                self.advance();
-                            } else {
-                                break;
-                            }
+                        if self.consume_digits_with_separators(
+                            &mut lexeme,
+                            &mut raw_for_span,
+                            |c| c.is_ascii_hexdigit(),
+                        )
+                        .is_some()
+                        {
+                            let span = Span::from_text(start_pos, &raw_for_span);
+                            return Token::new(
+                                TokenType::Error("invalid numeric separator".to_string()),
+                                raw_for_span.clone(),
+                                span,
+                            );
                         }
                     }
                     'b' | 'B' => {
                         lexeme.push(ch);
+                        raw_for_span.push(ch);
                         self.advance();
-                        while let Some(ch) = self.current_char {
-                            if ch == '0' || ch == '1' {
-                                lexeme.push(ch);
-                                self.advance();
-                            } else {
-                                break;
-                            }
+                        if self.consume_digits_with_separators(
+                            &mut lexeme,
+                            &mut raw_for_span,
+                            |c| c == '0' || c == '1',
+                        )
+                        .is_some()
+                        {
+                            let span = Span::from_text(start_pos, &raw_for_span);
+                            return Token::new(
+                                TokenType::Error("invalid numeric separator".to_string()),
+                                raw_for_span.clone(),
+                                span,
+                            );
                         }
                     }
                     'o' | 'O' => {
                         lexeme.push(ch);
+                        raw_for_span.push(ch);
                         self.advance();
-                        while let Some(ch) = self.current_char {
-                            if ch.is_ascii_digit() && ch < '8' {
-                                lexeme.push(ch);
-                                self.advance();
-                            } else {
-                                break;
-                            }
+                        if self.consume_digits_with_separators(
+                            &mut lexeme,
+                            &mut raw_for_span,
+                            |c| c.is_ascii_digit() && c < '8',
+                        )
+                        .is_some()
+                        {
+                            let span = Span::from_text(start_pos, &raw_for_span);
+                            return Token::new(
+                                TokenType::Error("invalid numeric separator".to_string()),
+                                raw_for_span.clone(),
+                                span,
+                            );
                         }
                     }
                     _ => {
-                        while let Some(ch) = self.current_char {
-                            if ch.is_ascii_digit() {
-                                lexeme.push(ch);
-                                self.advance();
-                            } else {
-                                break;
-                            }
+                        if self.consume_digits_with_separators(
+                            &mut lexeme,
+                            &mut raw_for_span,
+                            |c| c.is_ascii_digit(),
+                        )
+                        .is_some()
+                        {
+                            let span = Span::from_text(start_pos, &raw_for_span);
+                            return Token::new(
+                                TokenType::Error("invalid numeric separator".to_string()),
+                                raw_for_span.clone(),
+                                span,
+                            );
                         }
                     }
                 }
             }
         } else {
-            while let Some(ch) = self.current_char {
-                if ch.is_ascii_digit() {
-                    lexeme.push(ch);
-                    self.advance();
-                } else {
-                    break;
-                }
+            if self.consume_digits_with_separators(
+                &mut lexeme,
+                &mut raw_for_span,
+                |c| c.is_ascii_digit(),
+            )
+            .is_some()
+            {
+                let span = Span::from_text(start_pos, &raw_for_span);
+                return Token::new(
+                    TokenType::Error("invalid numeric separator".to_string()),
+                    raw_for_span.clone(),
+                    span,
+                );
             }
         }
 
         if self.current_char == Some('.') {
             lexeme.push('.');
+            raw_for_span.push('.');
             self.advance();
-            while let Some(ch) = self.current_char {
-                if ch.is_ascii_digit() {
-                    lexeme.push(ch);
-                    self.advance();
-                } else {
-                    break;
-                }
+            if self.consume_digits_with_separators(
+                &mut lexeme,
+                &mut raw_for_span,
+                |c| c.is_ascii_digit(),
+            )
+            .is_some()
+            {
+                let span = Span::from_text(start_pos, &raw_for_span);
+                return Token::new(
+                    TokenType::Error("invalid numeric separator".to_string()),
+                    raw_for_span.clone(),
+                    span,
+                );
             }
         }
 
@@ -203,61 +283,78 @@ impl Lexer<'_> {
             && (ch == 'e' || ch == 'E')
         {
             lexeme.push(ch);
+            raw_for_span.push(ch);
             self.advance();
             if let Some(ch) = self.current_char
                 && (ch == '+' || ch == '-')
             {
                 lexeme.push(ch);
+                raw_for_span.push(ch);
                 self.advance();
             }
-            while let Some(ch) = self.current_char {
-                if ch.is_ascii_digit() {
-                    lexeme.push(ch);
-                    self.advance();
-                } else {
-                    break;
-                }
+            if self.consume_digits_with_separators(
+                &mut lexeme,
+                &mut raw_for_span,
+                |c| c.is_ascii_digit(),
+            )
+            .is_some()
+            {
+                let span = Span::from_text(start_pos, &raw_for_span);
+                return Token::new(
+                    TokenType::Error("invalid numeric separator".to_string()),
+                    raw_for_span.clone(),
+                    span,
+                );
             }
         }
 
-        let span = Span::from_text(start_pos, &lexeme);
+        let span = Span::from_text(start_pos, &raw_for_span);
         Token::new(TokenType::Number, lexeme, span)
     }
 
     fn scan_decimal_literal(&mut self) -> Token {
         let start_pos = self.position;
         let mut lexeme = String::from("0");
-        lexeme.push(self.current_char.expect("caller ensures we are at '.'"));
+        let mut raw_for_span = String::from("0");
+        let ch = self.current_char.expect("caller ensures we are at '.'");
+        lexeme.push(ch);
+        raw_for_span.push(ch);
         self.advance();
-        while let Some(ch) = self.current_char {
-            if ch.is_ascii_digit() {
-                lexeme.push(ch);
-                self.advance();
-            } else {
-                break;
-            }
+        if self.consume_digits_with_separators(&mut lexeme, &mut raw_for_span, |c| c.is_ascii_digit())
+            .is_some()
+        {
+            let span = Span::from_text(start_pos, &raw_for_span);
+            return Token::new(
+                TokenType::Error("invalid numeric separator".to_string()),
+                raw_for_span.clone(),
+                span,
+            );
         }
         if let Some(ch) = self.current_char
             && (ch == 'e' || ch == 'E')
         {
             lexeme.push(ch);
+            raw_for_span.push(ch);
             self.advance();
             if let Some(ch) = self.current_char
                 && (ch == '+' || ch == '-')
             {
                 lexeme.push(ch);
+                raw_for_span.push(ch);
                 self.advance();
             }
-            while let Some(ch) = self.current_char {
-                if ch.is_ascii_digit() {
-                    lexeme.push(ch);
-                    self.advance();
-                } else {
-                    break;
-                }
+            if self.consume_digits_with_separators(&mut lexeme, &mut raw_for_span, |c| c.is_ascii_digit())
+                .is_some()
+            {
+                let span = Span::from_text(start_pos, &raw_for_span);
+                return Token::new(
+                    TokenType::Error("invalid numeric separator".to_string()),
+                    raw_for_span.clone(),
+                    span,
+                );
             }
         }
-        let span = Span::from_text(start_pos, &lexeme);
+        let span = Span::from_text(start_pos, &raw_for_span);
         Token::new(TokenType::Number, lexeme, span)
     }
 
@@ -703,6 +800,34 @@ mod tests {
         assert_eq!(tokens[1].lexeme, "0.5e2");
         assert_eq!(tokens[2].token_type, TokenType::Number);
         assert_eq!(tokens[2].lexeme, "0.123");
+    }
+
+    #[test]
+    fn lexer_numeric_separator_literal() {
+        let source = "1_000_000 0x1_0 0b1_0 0o7_7".to_string();
+        let mut lexer = Lexer::new(source);
+        let tokens = lexer.tokenize();
+
+        assert_eq!(tokens.len(), 4);
+        assert_eq!(tokens[0].token_type, TokenType::Number);
+        assert_eq!(tokens[0].lexeme, "1000000");
+        assert_eq!(tokens[1].token_type, TokenType::Number);
+        assert_eq!(tokens[1].lexeme, "0x10");
+        assert_eq!(tokens[2].token_type, TokenType::Number);
+        assert_eq!(tokens[2].lexeme, "0b10");
+        assert_eq!(tokens[3].token_type, TokenType::Number);
+        assert_eq!(tokens[3].lexeme, "0o77");
+    }
+
+    #[test]
+    fn lexer_numeric_separator_invalid_adjacent() {
+        let source = "0x0__0".to_string();
+        let mut lexer = Lexer::new(source);
+        let tokens = lexer.tokenize();
+
+        assert_eq!(tokens.len(), 1);
+        assert!(matches!(tokens[0].token_type, TokenType::Error(_)));
+        assert_eq!(tokens[0].lexeme, "0x0__0");
     }
 
     #[test]

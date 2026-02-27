@@ -1270,8 +1270,9 @@ impl Parser {
                 let mut elems = Vec::new();
                 for elem in &arr.elements {
                     let (binding, default_init) = match elem {
-                        Expression::Identifier(ident) => (Some(ident.name.clone()), None),
-                        Expression::Assign(assign) => {
+                        None => (None, None),
+                        Some(Expression::Identifier(ident)) => (Some(ident.name.clone()), None),
+                        Some(Expression::Assign(assign)) => {
                             if let Expression::Identifier(ident) = assign.left.as_ref() {
                                 let mut default_init = *assign.right.clone();
                                 Self::assign_default_initializer_name(
@@ -1283,7 +1284,7 @@ impl Parser {
                                 return None;
                             }
                         }
-                        _ => return None,
+                        Some(_) => return None,
                     };
                     elems.push(ArrayPatternElem {
                         binding,
@@ -2271,9 +2272,17 @@ impl Parser {
                     self.current().map(|t| &t.token_type),
                     Some(TokenType::RightBracket) | Some(TokenType::Eof) | None
                 ) {
-                    elements.push(self.parse_expression_prec(1)?);
-                    if !self.optional(TokenType::Comma) {
-                        break;
+                    if matches!(
+                        self.current().map(|t| &t.token_type),
+                        Some(TokenType::Comma)
+                    ) {
+                        elements.push(None);
+                        self.advance();
+                    } else {
+                        elements.push(Some(self.parse_expression_prec(1)?));
+                        if !self.optional(TokenType::Comma) {
+                            break;
+                        }
                     }
                 }
                 let end_tok = self.expect(TokenType::RightBracket)?;

@@ -1,6 +1,6 @@
 //! Builtin function dispatch.
 //!
-//! IDs 0..=MAX_BUILTIN_ID map to BuiltinId in src/ir/hir.rs.
+//! IDs 0..=MAX_BUILTIN_ID are sequential indices into BUILTINS.
 //! See submodules: host, object, array, string, number, boolean, error, math, json, map, set.
 
 mod array;
@@ -266,6 +266,81 @@ const BUILTINS: &[BuiltinDef] = &[
         category: "Array",
         name: "fill",
         entry: BuiltinEntry::Normal(array::fill),
+    },
+    BuiltinDef {
+        category: "Array",
+        name: "lastIndexOf",
+        entry: BuiltinEntry::Normal(array::last_index_of),
+    },
+    BuiltinDef {
+        category: "Array",
+        name: "toString",
+        entry: BuiltinEntry::Normal(array::to_string),
+    },
+    BuiltinDef {
+        category: "Array",
+        name: "map",
+        entry: BuiltinEntry::Throwing(array::map),
+    },
+    BuiltinDef {
+        category: "Array",
+        name: "reduce",
+        entry: BuiltinEntry::Throwing(array::reduce),
+    },
+    BuiltinDef {
+        category: "Array",
+        name: "reduceRight",
+        entry: BuiltinEntry::Throwing(array::reduce_right),
+    },
+    BuiltinDef {
+        category: "Array",
+        name: "some",
+        entry: BuiltinEntry::Normal(array::some),
+    },
+    BuiltinDef {
+        category: "Array",
+        name: "every",
+        entry: BuiltinEntry::Normal(array::every),
+    },
+    BuiltinDef {
+        category: "Array",
+        name: "forEach",
+        entry: BuiltinEntry::Normal(array::for_each),
+    },
+    BuiltinDef {
+        category: "Array",
+        name: "filter",
+        entry: BuiltinEntry::Normal(array::filter),
+    },
+    BuiltinDef {
+        category: "Array",
+        name: "splice",
+        entry: BuiltinEntry::Normal(array::splice),
+    },
+    BuiltinDef {
+        category: "Array",
+        name: "sort",
+        entry: BuiltinEntry::Normal(array::sort),
+    },
+    BuiltinDef {
+        category: "Array",
+        name: "toLocaleString",
+        entry: BuiltinEntry::Normal(array::to_locale_string),
+    },
+    BuiltinDef {
+        category: "Array",
+        name: "values",
+        entry: BuiltinEntry::Normal(array::values),
+    },
+    BuiltinDef {
+        category: "Array",
+        name: "keys",
+        entry: BuiltinEntry::Normal(array::keys),
+    },
+    BuiltinDef {
+        category: "Array",
+        name: "entries",
+        entry: BuiltinEntry::Normal(array::entries),
     },
     // Math 0..8
     BuiltinDef {
@@ -811,140 +886,14 @@ const BUILTINS: &[BuiltinDef] = &[
     },
 ];
 
-const INVALID: u8 = 0xFF;
-
-static ENCODED_TO_INDEX: [u8; 256] = {
-    let mut t = [INVALID; 256];
-    t[0x00] = 0;
-    t[0x10] = 1;
-    t[0x11] = 2;
-    t[0x12] = 3;
-    t[0x13] = 4;
-    t[0x14] = 5;
-    t[0x15] = 6;
-    t[0x16] = 7;
-    t[0x17] = 8;
-    t[0x18] = 9;
-    t[0x19] = 10;
-    t[0x1A] = 11;
-    t[0x1B] = 12;
-    t[0x20] = 13;
-    t[0x21] = 14;
-    t[0x22] = 15;
-    t[0x23] = 16;
-    t[0x24] = 17;
-    t[0x25] = 18;
-    t[0x26] = 19;
-    t[0x27] = 20;
-    t[0x28] = 21;
-    t[0x30] = 22;
-    t[0x31] = 23;
-    t[0x40] = 24;
-    t[0x41] = 25;
-    t[0x42] = 26;
-    t[0x43] = 27;
-    t[0x44] = 28;
-    t[0x45] = 29;
-    t[0x46] = 30;
-    t[0x47] = 31;
-    t[0x48] = 32;
-    t[0x49] = 33;
-    t[0x4A] = 34;
-    t[0x4B] = 35;
-    t[0x4C] = 36;
-    t[0x4D] = 37;
-    t[0x4E] = 38;
-    t[0x50] = 39;
-    t[0x51] = 40;
-    t[0x52] = 41;
-    t[0x53] = 42;
-    t[0x54] = 43;
-    t[0x55] = 44;
-    t[0x56] = 45;
-    t[0x60] = 46;
-    t[0x61] = 47;
-    t[0x62] = 48;
-    t[0x63] = 49;
-    t[0x64] = 50;
-    t[0x65] = 51;
-    t[0x66] = 52;
-    t[0x67] = 53;
-    t[0x68] = 54;
-    t[0x69] = 55;
-    t[0x6A] = 56;
-    t[0x6B] = 57;
-    t[0x6C] = 58;
-    t[0x6D] = 59;
-    t[0x6E] = 60;
-    t[0x6F] = 61;
-    t[0x70] = 62;
-    t[0x80] = 63;
-    t[0x81] = 64;
-    t[0x82] = 65;
-    t[0x90] = 66;
-    t[0x91] = 67;
-    t[0x92] = 68;
-    t[0x93] = 69;
-    t[0xA0] = 70;
-    t[0xA1] = 71;
-    t[0xA2] = 72;
-    t[0xA3] = 73;
-    t[0xB0] = 74;
-    t[0xB1] = 75;
-    t[0xB2] = 76;
-    t[0xB3] = 77;
-    t[0xB4] = 78;
-    t[0xC0] = 79;
-    t[0xC1] = 80;
-    t[0xC2] = 81;
-    t[0xC3] = 82;
-    t[0xC4] = 83;
-    t[0xC5] = 84;
-    t[0xC6] = 85;
-    t[0xC7] = 86;
-    t[0xD0] = 87;
-    t[0xD1] = 88;
-    t[0xD2] = 89;
-    t[0xD3] = 90;
-    t[0xD4] = 91;
-    t[0xD5] = 92;
-    t[0xD6] = 93;
-    t[0xD7] = 94;
-    t[0xD8] = 95;
-    t[0xD9] = 96;
-    t[0xDA] = 97;
-    t[0xDB] = 98;
-    t[0xDC] = 99;
-    t[0xDD] = 100;
-    t[0xDE] = 101;
-    t[0xDF] = 102;
-    t[0xE0] = 103;
-    t[0xE1] = 104;
-    t[0xE2] = 105;
-    t[0xE3] = 106;
-    t[0xE4] = 107;
-    t[0xE5] = 108;
-    t[0xE6] = 109;
-    t[0xE7] = 110;
-    t[0xE8] = 111;
-    t[0xE9] = 112;
-    t[0xEA] = 113;
-    t[0x4F] = 114;
-    t[0x57] = 115;
-    t[0x58] = 116;
-    t[0xEB] = 117;
-    t[0xEC] = 118;
-    t
-};
-
-pub const MAX_BUILTIN_ID: u8 = 0xEC;
+pub const MAX_BUILTIN_ID: u8 = (BUILTINS.len() - 1) as u8;
 
 fn index_for(id: u8) -> Option<usize> {
-    let idx = ENCODED_TO_INDEX[id as usize];
-    if idx == INVALID {
-        None
+    let idx = id as usize;
+    if idx < BUILTINS.len() {
+        Some(idx)
     } else {
-        Some(idx as usize)
+        None
     }
 }
 
@@ -970,32 +919,21 @@ pub fn all() -> &'static [BuiltinDef] {
     BUILTINS
 }
 
-const INDEX_TO_ENCODED: [u8; 119] = [
-    0x00, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B, 0x20, 0x21, 0x22,
-    0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x30, 0x31, 0x40, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47,
-    0x48, 0x49, 0x4A, 0x4B, 0x4C, 0x4D, 0x4E, 0x50, 0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x60, 0x61,
-    0x62, 0x63, 0x64, 0x65, 0x66, 0x67, 0x68, 0x69, 0x6A, 0x6B, 0x6C, 0x6D, 0x6E, 0x6F, 0x70, 0x80,
-    0x81, 0x82, 0x90, 0x91, 0x92, 0x93, 0xA0, 0xA1, 0xA2, 0xA3, 0xB0, 0xB1, 0xB2, 0xB3, 0xB4, 0xC0,
-    0xC1, 0xC2, 0xC3, 0xC4, 0xC5, 0xC6, 0xC7, 0xD0, 0xD1, 0xD2, 0xD3, 0xD4, 0xD5, 0xD6, 0xD7, 0xD8,
-    0xD9, 0xDA, 0xDB, 0xDC, 0xDD, 0xDE, 0xDF, 0xE0, 0xE1, 0xE2, 0xE3, 0xE4, 0xE5, 0xE6, 0xE7, 0xE8,
-    0xE9, 0xEA, 0x4F, 0x57, 0x58, 0xEB, 0xEC,
-];
-
 pub fn by_category(cat: &str) -> impl Iterator<Item = (u8, &'static BuiltinDef)> {
     BUILTINS
         .iter()
         .enumerate()
         .filter(move |(_, b)| b.category == cat)
-        .filter_map(|(i, b)| INDEX_TO_ENCODED.get(i).map(|&id| (id, b)))
+        .filter_map(|(i, b)| (i <= u8::MAX as usize).then(|| (i as u8, b)))
 }
 
-/// Resolve (category, name) to builtin id. For lower/compile consistency.
+/// Resolve (category, name) to builtin index. Index is 0..BUILTINS.len()-1.
 pub fn resolve(category: &str, name: &str) -> Option<u8> {
     BUILTINS
         .iter()
         .enumerate()
         .find(|(_, b)| b.category == category && b.name == name)
-        .and_then(|(i, _)| INDEX_TO_ENCODED.get(i).copied())
+        .map(|(i, _)| i as u8)
 }
 
 pub fn dispatch(id: u8, args: &[Value], ctx: &mut BuiltinContext) -> Result<Value, BuiltinError> {
@@ -1024,7 +962,8 @@ mod tests {
             dynamic_chunks: &mut dynamic_chunks,
         };
         let args = [crate::runtime::Value::String(".".to_string())];
-        let r = dispatch(0x80, &args, &mut ctx);
+        let id = resolve("RegExp", "escape").expect("RegExp.escape");
+        let r = dispatch(id, &args, &mut ctx);
         assert!(r.is_ok(), "dispatch failed: {:?}", r);
         let v = r.unwrap();
         let expected = crate::runtime::Value::String("\\.".to_string());
@@ -1033,21 +972,21 @@ mod tests {
 
     #[test]
     fn resolve_known_builtins() {
-        assert_eq!(resolve("Host", "print"), Some(0x00));
-        assert_eq!(resolve("Array", "push"), Some(0x10));
-        assert_eq!(resolve("Math", "floor"), Some(0x20));
-        assert_eq!(resolve("Json", "parse"), Some(0x30));
-        assert_eq!(resolve("Object", "preventExtensions"), Some(0x44));
-        assert_eq!(resolve("Object", "setPrototypeOf"), Some(0x46));
-        assert_eq!(resolve("String", "fromCharCode"), Some(0x66));
-        assert_eq!(resolve("Date", "now"), Some(0xC1));
-        assert_eq!(resolve("Global", "Function"), Some(0xE4));
+        assert_eq!(resolve("Host", "print"), Some(0));
+        assert_eq!(resolve("Array", "push"), Some(1));
+        assert_eq!(resolve("Math", "floor"), Some(28));
+        assert_eq!(resolve("Json", "parse"), Some(37));
+        assert_eq!(resolve("Object", "preventExtensions"), Some(43));
+        assert_eq!(resolve("Object", "setPrototypeOf"), Some(45));
+        assert_eq!(resolve("String", "fromCharCode"), Some(67));
+        assert_eq!(resolve("Date", "now"), Some(95));
+        assert_eq!(resolve("Global", "Function"), Some(122));
         assert_eq!(resolve("Unknown", "foo"), None);
     }
 
     #[test]
-    fn function_builtin_at_0xe4() {
-        assert_eq!(resolve("Global", "Function"), Some(0xE4));
-        assert_eq!(name(0xE4), "Function");
+    fn function_builtin_resolve() {
+        let id = resolve("Global", "Function").expect("Function");
+        assert_eq!(name(id), "Function");
     }
 }

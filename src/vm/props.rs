@@ -1,4 +1,9 @@
+use crate::runtime::builtins;
 use crate::runtime::{Heap, Value};
+
+fn b(category: &str, name: &str) -> u8 {
+    builtins::resolve(category, name).expect("primitive method builtins are registered in BUILTINS")
+}
 
 pub(crate) struct GetPropCache {
     obj_id: usize,
@@ -95,73 +100,72 @@ pub(crate) fn resolve_get_prop(
 
 pub(crate) fn primitive_string_method(key: &str) -> Value {
     match key {
-        "includes" => Value::Builtin(0x1A),
-        "indexOf" => Value::Builtin(0x19),
-        "split" => Value::Builtin(0x60),
-        "trim" => Value::Builtin(0x61),
-        "toLowerCase" => Value::Builtin(0x62),
-        "toUpperCase" => Value::Builtin(0x63),
-        "charAt" => Value::Builtin(0x64),
-        "repeat" => Value::Builtin(0x65),
-        "anchor" => Value::Builtin(0x67),
-        "big" => Value::Builtin(0x68),
-        "blink" => Value::Builtin(0x69),
-        "bold" => Value::Builtin(0x6A),
-        "fixed" => Value::Builtin(0x6B),
-        "fontcolor" => Value::Builtin(0x6C),
-        "fontsize" => Value::Builtin(0x6D),
-        "italics" => Value::Builtin(0x6E),
-        "link" => Value::Builtin(0x6F),
-        "small" => Value::Builtin(0xB1),
-        "strike" => Value::Builtin(0xB2),
-        "sub" => Value::Builtin(0xB3),
-        "sup" => Value::Builtin(0xB4),
+        "includes" => Value::Builtin(b("Array", "includes")),
+        "indexOf" => Value::Builtin(b("Array", "indexOf")),
+        "split" => Value::Builtin(b("String", "split")),
+        "trim" => Value::Builtin(b("String", "trim")),
+        "toLowerCase" => Value::Builtin(b("String", "toLowerCase")),
+        "toUpperCase" => Value::Builtin(b("String", "toUpperCase")),
+        "charAt" => Value::Builtin(b("String", "charAt")),
+        "repeat" => Value::Builtin(b("String", "repeat")),
+        "anchor" => Value::Builtin(b("String", "anchor")),
+        "big" => Value::Builtin(b("String", "big")),
+        "blink" => Value::Builtin(b("String", "blink")),
+        "bold" => Value::Builtin(b("String", "bold")),
+        "fixed" => Value::Builtin(b("String", "fixed")),
+        "fontcolor" => Value::Builtin(b("String", "fontcolor")),
+        "fontsize" => Value::Builtin(b("String", "fontsize")),
+        "italics" => Value::Builtin(b("String", "italics")),
+        "link" => Value::Builtin(b("String", "link")),
+        "small" => Value::Builtin(b("String", "small")),
+        "strike" => Value::Builtin(b("String", "strike")),
+        "sub" => Value::Builtin(b("String", "sub")),
+        "sup" => Value::Builtin(b("String", "sup")),
         _ => Value::Undefined,
     }
 }
 
 pub(crate) fn primitive_date_method(key: &str) -> Value {
     match key {
-        "getTime" => Value::Builtin(0xC2),
-        "valueOf" => Value::Builtin(0xC2),
-        "toString" => Value::Builtin(0xC3),
-        "toISOString" => Value::Builtin(0xC4),
-        "getYear" => Value::Builtin(0xC5),
-        "setYear" => Value::Builtin(0xC6),
-        "toGMTString" => Value::Builtin(0xC7),
+        "getTime" | "valueOf" => Value::Builtin(b("Date", "getTime")),
+        "toString" => Value::Builtin(b("Date", "toString")),
+        "toISOString" => Value::Builtin(b("Date", "toISOString")),
+        "getYear" => Value::Builtin(b("Date", "getYear")),
+        "setYear" => Value::Builtin(b("Date", "setYear")),
+        "toGMTString" => Value::Builtin(b("Date", "toGMTString")),
         _ => Value::Undefined,
     }
 }
 
 pub(crate) fn primitive_number_method(key: &str) -> Value {
     match key {
-        "toString" => Value::Builtin(0x55),
-        "valueOf" => Value::Builtin(0x56),
+        "toString" => Value::Builtin(b("Number", "primitiveToString")),
+        "valueOf" => Value::Builtin(b("Number", "primitiveValueOf")),
         _ => Value::Undefined,
     }
 }
 
 pub(crate) fn primitive_bool_method(key: &str) -> Value {
     match key {
-        "toString" => Value::Builtin(0x55),
-        "valueOf" => Value::Builtin(0x56),
+        "toString" => Value::Builtin(b("Number", "primitiveToString")),
+        "valueOf" => Value::Builtin(b("Number", "primitiveValueOf")),
         _ => Value::Undefined,
     }
 }
 
 pub(crate) fn primitive_map_method(key: &str) -> Value {
     match key {
-        "set" => Value::Builtin(0x91),
-        "get" => Value::Builtin(0x92),
-        "has" => Value::Builtin(0x93),
+        "set" => Value::Builtin(b("Map", "set")),
+        "get" => Value::Builtin(b("Map", "get")),
+        "has" => Value::Builtin(b("Map", "has")),
         _ => Value::Undefined,
     }
 }
 
 pub(crate) fn primitive_set_method(key: &str) -> Value {
     match key {
-        "add" => Value::Builtin(0xA1),
-        "has" => Value::Builtin(0xA2),
+        "add" => Value::Builtin(b("Set", "add")),
+        "has" => Value::Builtin(b("Set", "has")),
         _ => Value::Undefined,
     }
 }

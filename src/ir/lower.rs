@@ -1,7 +1,12 @@
 use crate::diagnostics::Span;
 use crate::frontend::ast::*;
 use crate::ir::hir::*;
+use crate::runtime::builtins;
 use std::collections::HashMap;
+
+fn b(category: &str, name: &str) -> u8 {
+    builtins::resolve(category, name).unwrap_or_else(|| panic!("builtin {}::{}", category, name))
+}
 
 const GLOBAL_NAMES: &[&str] = &[
     "Object",
@@ -276,7 +281,9 @@ fn collect_function_exprs_expr(expr: &Expression, out: &mut Vec<(NodeId, Functio
         }
         Expression::ArrayLiteral(a) => {
             for e in &a.elements {
-                collect_function_exprs_expr(e, out);
+                if let Some(expr) = e {
+                    collect_function_exprs_expr(expr, out);
+                }
             }
         }
         _ => {}
@@ -1647,7 +1654,7 @@ fn compile_statement(stmt: &Statement, ctx: &mut LowerCtx<'_>) -> Result<bool, L
                 span: f.span,
             });
             ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
-                builtin: crate::ir::hir::BuiltinId::Object1,
+                builtin: b("Object", "keys"),
                 argc: 1,
                 span: f.span,
             });
@@ -2207,7 +2214,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                     span: e.span,
                 });
                 ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
-                    builtin: crate::ir::hir::BuiltinId::RegExp1,
+                    builtin: b("RegExp", "create"),
                     argc: 2,
                     span: e.span,
                 });
@@ -2796,7 +2803,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                         compile_expression(arg, ctx)?;
                     }
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
-                        builtin: crate::ir::hir::BuiltinId::Host0,
+                        builtin: b("Host", "print"),
                         argc: e.args.len() as u32,
                         span: e.span,
                     });
@@ -2806,7 +2813,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                 {
                     compile_expression(&e.args[0], ctx)?;
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
-                        builtin: crate::ir::hir::BuiltinId::Math0,
+                        builtin: b("Math", "floor"),
                         argc: 1,
                         span: e.span,
                     });
@@ -2816,7 +2823,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                 {
                     compile_expression(&e.args[0], ctx)?;
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
-                        builtin: crate::ir::hir::BuiltinId::Math1,
+                        builtin: b("Math", "abs"),
                         argc: 1,
                         span: e.span,
                     });
@@ -2825,7 +2832,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                         compile_expression(arg, ctx)?;
                     }
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
-                        builtin: crate::ir::hir::BuiltinId::Math2,
+                        builtin: b("Math", "min"),
                         argc: e.args.len() as u32,
                         span: e.span,
                     });
@@ -2834,7 +2841,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                         compile_expression(arg, ctx)?;
                     }
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
-                        builtin: crate::ir::hir::BuiltinId::Math3,
+                        builtin: b("Math", "max"),
                         argc: e.args.len() as u32,
                         span: e.span,
                     });
@@ -2845,7 +2852,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                     compile_expression(&e.args[0], ctx)?;
                     compile_expression(&e.args[1], ctx)?;
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
-                        builtin: crate::ir::hir::BuiltinId::Math4,
+                        builtin: b("Math", "pow"),
                         argc: 2,
                         span: e.span,
                     });
@@ -2855,7 +2862,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                 {
                     compile_expression(&e.args[0], ctx)?;
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
-                        builtin: crate::ir::hir::BuiltinId::Math5,
+                        builtin: b("Math", "ceil"),
                         argc: 1,
                         span: e.span,
                     });
@@ -2865,7 +2872,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                 {
                     compile_expression(&e.args[0], ctx)?;
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
-                        builtin: crate::ir::hir::BuiltinId::Math6,
+                        builtin: b("Math", "round"),
                         argc: 1,
                         span: e.span,
                     });
@@ -2875,7 +2882,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                 {
                     compile_expression(&e.args[0], ctx)?;
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
-                        builtin: crate::ir::hir::BuiltinId::Math7,
+                        builtin: b("Math", "sqrt"),
                         argc: 1,
                         span: e.span,
                     });
@@ -2884,7 +2891,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                     && e.args.len() == 0
                 {
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
-                        builtin: crate::ir::hir::BuiltinId::Math8,
+                        builtin: b("Math", "random"),
                         argc: 0,
                         span: e.span,
                     });
@@ -2894,7 +2901,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                 {
                     compile_expression(&e.args[0], ctx)?;
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
-                        builtin: crate::ir::hir::BuiltinId::Json0,
+                        builtin: b("Json", "parse"),
                         argc: 1,
                         span: e.span,
                     });
@@ -2904,7 +2911,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                 {
                     compile_expression(&e.args[0], ctx)?;
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
-                        builtin: crate::ir::hir::BuiltinId::Json1,
+                        builtin: b("Json", "stringify"),
                         argc: 1,
                         span: e.span,
                     });
@@ -2914,7 +2921,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                 {
                     compile_expression(&e.args[0], ctx)?;
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
-                        builtin: crate::ir::hir::BuiltinId::Object0,
+                        builtin: b("Object", "create"),
                         argc: 1,
                         span: e.span,
                     });
@@ -2924,7 +2931,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                 {
                     compile_expression(&e.args[0], ctx)?;
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
-                        builtin: crate::ir::hir::BuiltinId::Object1,
+                        builtin: b("Object", "keys"),
                         argc: 1,
                         span: e.span,
                     });
@@ -2936,7 +2943,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                         compile_expression(arg, ctx)?;
                     }
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
-                        builtin: crate::ir::hir::BuiltinId::Object2,
+                        builtin: b("Object", "assign"),
                         argc: e.args.len() as u32,
                         span: e.span,
                     });
@@ -2946,7 +2953,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                 {
                     compile_expression(&e.args[0], ctx)?;
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
-                        builtin: crate::ir::hir::BuiltinId::Object4,
+                        builtin: b("Object", "preventExtensions"),
                         argc: 1,
                         span: e.span,
                     });
@@ -2956,7 +2963,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                 {
                     compile_expression(&e.args[0], ctx)?;
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
-                        builtin: crate::ir::hir::BuiltinId::Object5,
+                        builtin: b("Object", "seal"),
                         argc: 1,
                         span: e.span,
                     });
@@ -2967,7 +2974,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                     compile_expression(&e.args[0], ctx)?;
                     compile_expression(&e.args[1], ctx)?;
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
-                        builtin: crate::ir::hir::BuiltinId::Object6,
+                        builtin: b("Object", "setPrototypeOf"),
                         argc: 2,
                         span: e.span,
                     });
@@ -2978,7 +2985,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                     compile_expression(&e.args[0], ctx)?;
                     compile_expression(&e.args[1], ctx)?;
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
-                        builtin: crate::ir::hir::BuiltinId::Object7,
+                        builtin: b("Object", "propertyIsEnumerable"),
                         argc: 2,
                         span: e.span,
                     });
@@ -2988,7 +2995,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                 {
                     compile_expression(&e.args[0], ctx)?;
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
-                        builtin: crate::ir::hir::BuiltinId::Object8,
+                        builtin: b("Object", "getPrototypeOf"),
                         argc: 1,
                         span: e.span,
                     });
@@ -2998,7 +3005,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                 {
                     compile_expression(&e.args[0], ctx)?;
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
-                        builtin: crate::ir::hir::BuiltinId::Object9,
+                        builtin: b("Object", "freeze"),
                         argc: 1,
                         span: e.span,
                     });
@@ -3008,7 +3015,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                 {
                     compile_expression(&e.args[0], ctx)?;
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
-                        builtin: crate::ir::hir::BuiltinId::Object10,
+                        builtin: b("Object", "isExtensible"),
                         argc: 1,
                         span: e.span,
                     });
@@ -3018,7 +3025,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                 {
                     compile_expression(&e.args[0], ctx)?;
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
-                        builtin: crate::ir::hir::BuiltinId::Object11,
+                        builtin: b("Object", "isFrozen"),
                         argc: 1,
                         span: e.span,
                     });
@@ -3028,7 +3035,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                 {
                     compile_expression(&e.args[0], ctx)?;
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
-                        builtin: crate::ir::hir::BuiltinId::Object12,
+                        builtin: b("Object", "isSealed"),
                         argc: 1,
                         span: e.span,
                     });
@@ -3039,7 +3046,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                     compile_expression(&e.args[0], ctx)?;
                     compile_expression(&e.args[1], ctx)?;
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
-                        builtin: crate::ir::hir::BuiltinId::Object13,
+                        builtin: b("Object", "hasOwn"),
                         argc: 2,
                         span: e.span,
                     });
@@ -3050,7 +3057,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                     compile_expression(&e.args[0], ctx)?;
                     compile_expression(&e.args[1], ctx)?;
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
-                        builtin: crate::ir::hir::BuiltinId::Object14,
+                        builtin: b("Object", "is"),
                         argc: 2,
                         span: e.span,
                     });
@@ -3060,7 +3067,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                 {
                     compile_expression(&e.args[0], ctx)?;
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
-                        builtin: crate::ir::hir::BuiltinId::Number0,
+                        builtin: b("Number", "isSafeInteger"),
                         argc: 1,
                         span: e.span,
                     });
@@ -3071,7 +3078,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                         compile_expression(arg, ctx)?;
                     }
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
-                        builtin: crate::ir::hir::BuiltinId::String6,
+                        builtin: b("String", "fromCharCode"),
                         argc: e.args.len() as u32,
                         span: e.span,
                     });
@@ -3081,7 +3088,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                 {
                     compile_expression(&e.args[0], ctx)?;
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
-                        builtin: crate::ir::hir::BuiltinId::Array2,
+                        builtin: b("Array", "isArray"),
                         argc: 1,
                         span: e.span,
                     });
@@ -3091,7 +3098,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                 {
                     compile_expression(&e.args[0], ctx)?;
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
-                        builtin: crate::ir::hir::BuiltinId::Error0,
+                        builtin: b("Error", "isError"),
                         argc: 1,
                         span: e.span,
                     });
@@ -3100,7 +3107,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                     && e.args.is_empty()
                 {
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
-                        builtin: crate::ir::hir::BuiltinId::Date1,
+                        builtin: b("Date", "now"),
                         argc: 0,
                         span: e.span,
                     });
@@ -3110,7 +3117,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                 {
                     compile_expression(&e.args[0], ctx)?;
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
-                        builtin: crate::ir::hir::BuiltinId::RegExp0,
+                        builtin: b("RegExp", "escape"),
                         argc: 1,
                         span: e.span,
                     });
@@ -3120,14 +3127,14 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                         compile_expression(arg, ctx)?;
                     }
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
-                        builtin: crate::ir::hir::BuiltinId::Array0,
+                        builtin: b("Array", "push"),
                         argc: (1 + e.args.len()) as u32,
                         span: e.span,
                     });
                 } else if prop == "pop" {
                     compile_expression(&m.object, ctx)?;
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
-                        builtin: crate::ir::hir::BuiltinId::Array1,
+                        builtin: b("Array", "pop"),
                         argc: 1,
                         span: e.span,
                     });
@@ -3136,7 +3143,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                     compile_expression(&e.args[0], ctx)?;
                     compile_expression(&e.args[1], ctx)?;
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
-                        builtin: crate::ir::hir::BuiltinId::Map1,
+                        builtin: b("Map", "set"),
                         argc: 3,
                         span: e.span,
                     });
@@ -3144,7 +3151,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                     compile_expression(&m.object, ctx)?;
                     compile_expression(&e.args[0], ctx)?;
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
-                        builtin: crate::ir::hir::BuiltinId::Map2,
+                        builtin: b("Map", "get"),
                         argc: 2,
                         span: e.span,
                     });
@@ -3152,7 +3159,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                     compile_expression(&m.object, ctx)?;
                     compile_expression(&e.args[0], ctx)?;
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
-                        builtin: crate::ir::hir::BuiltinId::Collection0,
+                        builtin: b("Collection", "has"),
                         argc: 2,
                         span: e.span,
                     });
@@ -3160,28 +3167,28 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                     compile_expression(&m.object, ctx)?;
                     compile_expression(&e.args[0], ctx)?;
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
-                        builtin: crate::ir::hir::BuiltinId::Set1,
+                        builtin: b("Set", "add"),
                         argc: 2,
                         span: e.span,
                     });
                 } else if prop == "getTime" && e.args.is_empty() {
                     compile_expression(&m.object, ctx)?;
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
-                        builtin: crate::ir::hir::BuiltinId::Date2,
+                        builtin: b("Date", "getTime"),
                         argc: 1,
                         span: e.span,
                     });
                 } else if prop == "toString" && e.args.is_empty() {
                     compile_expression(&m.object, ctx)?;
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
-                        builtin: crate::ir::hir::BuiltinId::Date3,
+                        builtin: b("Date", "toString"),
                         argc: 1,
                         span: e.span,
                     });
                 } else if prop == "toISOString" && e.args.is_empty() {
                     compile_expression(&m.object, ctx)?;
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
-                        builtin: crate::ir::hir::BuiltinId::Date4,
+                        builtin: b("Date", "toISOString"),
                         argc: 1,
                         span: e.span,
                     });
@@ -3206,7 +3213,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                         });
                     }
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
-                        builtin: crate::ir::hir::BuiltinId::Array3,
+                        builtin: b("Array", "slice"),
                         argc: 3,
                         span: e.span,
                     });
@@ -3216,7 +3223,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                         compile_expression(arg, ctx)?;
                     }
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
-                        builtin: crate::ir::hir::BuiltinId::Array4,
+                        builtin: b("Array", "concat"),
                         argc: (e.args.len() + 1) as u32,
                         span: e.span,
                     });
@@ -3241,7 +3248,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                         });
                     }
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
-                        builtin: crate::ir::hir::BuiltinId::Array5,
+                        builtin: b("Array", "indexOf"),
                         argc: 3,
                         span: e.span,
                     });
@@ -3266,7 +3273,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                         });
                     }
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
-                        builtin: crate::ir::hir::BuiltinId::Array10,
+                        builtin: b("Array", "includes"),
                         argc: 3,
                         span: e.span,
                     });
@@ -3282,14 +3289,14 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                         });
                     }
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
-                        builtin: crate::ir::hir::BuiltinId::Array6,
+                        builtin: b("Array", "join"),
                         argc: 2,
                         span: e.span,
                     });
                 } else if prop == "shift" {
                     compile_expression(&m.object, ctx)?;
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
-                        builtin: crate::ir::hir::BuiltinId::Array7,
+                        builtin: b("Array", "shift"),
                         argc: 1,
                         span: e.span,
                     });
@@ -3299,14 +3306,14 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                         compile_expression(arg, ctx)?;
                     }
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
-                        builtin: crate::ir::hir::BuiltinId::Array8,
+                        builtin: b("Array", "unshift"),
                         argc: (1 + e.args.len()) as u32,
                         span: e.span,
                     });
                 } else if prop == "reverse" {
                     compile_expression(&m.object, ctx)?;
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
-                        builtin: crate::ir::hir::BuiltinId::Array9,
+                        builtin: b("Array", "reverse"),
                         argc: 1,
                         span: e.span,
                     });
@@ -3340,7 +3347,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                         });
                     }
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
-                        builtin: crate::ir::hir::BuiltinId::Array11,
+                        builtin: b("Array", "fill"),
                         argc: 4,
                         span: e.span,
                     });
@@ -3356,28 +3363,28 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                         });
                     }
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
-                        builtin: crate::ir::hir::BuiltinId::String0,
+                        builtin: b("String", "split"),
                         argc: 2,
                         span: e.span,
                     });
                 } else if prop == "trim" {
                     compile_expression(&m.object, ctx)?;
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
-                        builtin: crate::ir::hir::BuiltinId::String1,
+                        builtin: b("String", "trim"),
                         argc: 1,
                         span: e.span,
                     });
                 } else if prop == "toLowerCase" {
                     compile_expression(&m.object, ctx)?;
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
-                        builtin: crate::ir::hir::BuiltinId::String2,
+                        builtin: b("String", "toLowerCase"),
                         argc: 1,
                         span: e.span,
                     });
                 } else if prop == "toUpperCase" {
                     compile_expression(&m.object, ctx)?;
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
-                        builtin: crate::ir::hir::BuiltinId::String3,
+                        builtin: b("String", "toUpperCase"),
                         argc: 1,
                         span: e.span,
                     });
@@ -3393,7 +3400,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                         });
                     }
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
-                        builtin: crate::ir::hir::BuiltinId::String4,
+                        builtin: b("String", "charAt"),
                         argc: 2,
                         span: e.span,
                     });
@@ -3409,7 +3416,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                         });
                     }
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
-                        builtin: crate::ir::hir::BuiltinId::String5,
+                        builtin: b("String", "repeat"),
                         argc: 2,
                         span: e.span,
                     });
@@ -3425,7 +3432,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                         });
                     }
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
-                        builtin: crate::ir::hir::BuiltinId::Object3,
+                        builtin: b("Object", "hasOwnProperty"),
                         argc: 2,
                         span: e.span,
                     });
@@ -3433,7 +3440,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                     compile_expression(&m.object, ctx)?;
                     compile_expression(&e.args[0], ctx)?;
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
-                        builtin: crate::ir::hir::BuiltinId::Object7,
+                        builtin: b("Object", "propertyIsEnumerable"),
                         argc: 2,
                         span: e.span,
                     });
@@ -3494,7 +3501,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                     compile_expression(arg, ctx)?;
                 }
                 ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
-                    builtin: crate::ir::hir::BuiltinId::Type0,
+                    builtin: b("Type", "String"),
                     argc: e.args.len() as u32,
                     span: e.span,
                 });
@@ -3504,7 +3511,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                     compile_expression(arg, ctx)?;
                 }
                 ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
-                    builtin: crate::ir::hir::BuiltinId::Type1,
+                    builtin: b("Type", "Error"),
                     argc: e.args.len() as u32,
                     span: e.span,
                 });
@@ -3514,7 +3521,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                     compile_expression(arg, ctx)?;
                 }
                 ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
-                    builtin: crate::ir::hir::BuiltinId::RefErr0,
+                    builtin: b("Error", "ReferenceError"),
                     argc: e.args.len() as u32,
                     span: e.span,
                 });
@@ -3524,7 +3531,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                     compile_expression(arg, ctx)?;
                 }
                 ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
-                    builtin: crate::ir::hir::BuiltinId::TypeErr0,
+                    builtin: b("Error", "TypeError"),
                     argc: e.args.len() as u32,
                     span: e.span,
                 });
@@ -3534,7 +3541,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                     compile_expression(arg, ctx)?;
                 }
                 ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
-                    builtin: crate::ir::hir::BuiltinId::RangeErr0,
+                    builtin: b("Error", "RangeError"),
                     argc: e.args.len() as u32,
                     span: e.span,
                 });
@@ -3544,7 +3551,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                     compile_expression(arg, ctx)?;
                 }
                 ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
-                    builtin: crate::ir::hir::BuiltinId::SyntaxErr0,
+                    builtin: b("Error", "SyntaxError"),
                     argc: e.args.len() as u32,
                     span: e.span,
                 });
@@ -3554,7 +3561,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                     compile_expression(arg, ctx)?;
                 }
                 ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
-                    builtin: crate::ir::hir::BuiltinId::Type2,
+                    builtin: b("Type", "Number"),
                     argc: e.args.len() as u32,
                     span: e.span,
                 });
@@ -3564,7 +3571,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                     compile_expression(arg, ctx)?;
                 }
                 ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
-                    builtin: crate::ir::hir::BuiltinId::Type3,
+                    builtin: b("Type", "Boolean"),
                     argc: e.args.len() as u32,
                     span: e.span,
                 });
@@ -3574,7 +3581,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                     compile_expression(arg, ctx)?;
                 }
                 ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
-                    builtin: crate::ir::hir::BuiltinId::Symbol0,
+                    builtin: b("Symbol", "create"),
                     argc: e.args.len() as u32,
                     span: e.span,
                 });
@@ -3584,7 +3591,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                     compile_expression(arg, ctx)?;
                 }
                 ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
-                    builtin: crate::ir::hir::BuiltinId::Host0,
+                    builtin: b("Host", "print"),
                     argc: e.args.len() as u32,
                     span: e.span,
                 });
@@ -3594,7 +3601,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                     compile_expression(arg, ctx)?;
                 }
                 ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
-                    builtin: crate::ir::hir::BuiltinId::Eval0,
+                    builtin: b("Global", "eval"),
                     argc: e.args.len() as u32,
                     span: e.span,
                 });
@@ -3604,7 +3611,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                     compile_expression(arg, ctx)?;
                 }
                 ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
-                    builtin: crate::ir::hir::BuiltinId::EncodeUri0,
+                    builtin: b("Global", "encodeURI"),
                     argc: e.args.len() as u32,
                     span: e.span,
                 });
@@ -3614,7 +3621,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                     compile_expression(arg, ctx)?;
                 }
                 ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
-                    builtin: crate::ir::hir::BuiltinId::EncodeUriComponent0,
+                    builtin: b("Global", "encodeURIComponent"),
                     argc: e.args.len() as u32,
                     span: e.span,
                 });
@@ -3624,7 +3631,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                     compile_expression(arg, ctx)?;
                 }
                 ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
-                    builtin: crate::ir::hir::BuiltinId::DecodeUri0,
+                    builtin: b("Global", "decodeURI"),
                     argc: e.args.len() as u32,
                     span: e.span,
                 });
@@ -3634,7 +3641,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                     compile_expression(arg, ctx)?;
                 }
                 ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
-                    builtin: crate::ir::hir::BuiltinId::DecodeUriComponent0,
+                    builtin: b("Global", "decodeURIComponent"),
                     argc: e.args.len() as u32,
                     span: e.span,
                 });
@@ -3644,7 +3651,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                     compile_expression(arg, ctx)?;
                 }
                 ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
-                    builtin: crate::ir::hir::BuiltinId::RegExp1,
+                    builtin: b("RegExp", "create"),
                     argc: e.args.len() as u32,
                     span: e.span,
                 });
@@ -3654,7 +3661,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                     compile_expression(arg, ctx)?;
                 }
                 ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
-                    builtin: crate::ir::hir::BuiltinId::ParseInt0,
+                    builtin: b("Global", "parseInt"),
                     argc: e.args.len() as u32,
                     span: e.span,
                 });
@@ -3664,7 +3671,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                     compile_expression(arg, ctx)?;
                 }
                 ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
-                    builtin: crate::ir::hir::BuiltinId::ParseFloat0,
+                    builtin: b("Global", "parseFloat"),
                     argc: e.args.len() as u32,
                     span: e.span,
                 });
@@ -3700,7 +3707,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                         compile_expression(arg, ctx)?;
                     }
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
-                        builtin: crate::ir::hir::BuiltinId::Function0,
+                        builtin: b("Global", "Function"),
                         argc: e.args.len() as u32,
                         span: e.span,
                     });
@@ -3709,7 +3716,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                         compile_expression(arg, ctx)?;
                     }
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
-                        builtin: crate::ir::hir::BuiltinId::IsNaN0,
+                        builtin: b("Global", "isNaN"),
                         argc: e.args.len() as u32,
                         span: e.span,
                     });
@@ -3718,7 +3725,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                         compile_expression(arg, ctx)?;
                     }
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
-                        builtin: crate::ir::hir::BuiltinId::IsFinite0,
+                        builtin: b("Global", "isFinite"),
                         argc: e.args.len() as u32,
                         span: e.span,
                     });
@@ -3727,7 +3734,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                         compile_expression(arg, ctx)?;
                     }
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
-                        builtin: crate::ir::hir::BuiltinId::ParseInt0,
+                        builtin: b("Global", "parseInt"),
                         argc: e.args.len() as u32,
                         span: e.span,
                     });
@@ -3736,7 +3743,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                         compile_expression(arg, ctx)?;
                     }
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
-                        builtin: crate::ir::hir::BuiltinId::ParseFloat0,
+                        builtin: b("Global", "parseFloat"),
                         argc: e.args.len() as u32,
                         span: e.span,
                     });
@@ -3745,7 +3752,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                         compile_expression(arg, ctx)?;
                     }
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
-                        builtin: crate::ir::hir::BuiltinId::Eval0,
+                        builtin: b("Global", "eval"),
                         argc: e.args.len() as u32,
                         span: e.span,
                     });
@@ -3817,21 +3824,21 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                     compile_expression(arg, ctx)?;
                 }
                 ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
-                    builtin: crate::ir::hir::BuiltinId::Type1,
+                    builtin: b("Type", "Error"),
                     argc: n.args.len() as u32,
                     span: n.span,
                 });
             }
             Expression::Identifier(id) if id.name == "Map" && n.args.is_empty() => {
                 ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
-                    builtin: crate::ir::hir::BuiltinId::Map0,
+                    builtin: b("Map", "create"),
                     argc: 0,
                     span: n.span,
                 });
             }
             Expression::Identifier(id) if id.name == "Set" && n.args.is_empty() => {
                 ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
-                    builtin: crate::ir::hir::BuiltinId::Set0,
+                    builtin: b("Set", "create"),
                     argc: 0,
                     span: n.span,
                 });
@@ -3841,7 +3848,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                     compile_expression(arg, ctx)?;
                 }
                 ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
-                    builtin: crate::ir::hir::BuiltinId::Date0,
+                    builtin: b("Date", "create"),
                     argc: n.args.len() as u32,
                     span: n.span,
                 });
@@ -3851,7 +3858,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                     compile_expression(arg, ctx)?;
                 }
                 ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
-                    builtin: crate::ir::hir::BuiltinId::Type1,
+                    builtin: b("Type", "Error"),
                     argc: n.args.len() as u32,
                     span: n.span,
                 });
@@ -3861,7 +3868,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                     compile_expression(arg, ctx)?;
                 }
                 ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
-                    builtin: crate::ir::hir::BuiltinId::RefErr0,
+                    builtin: b("Error", "ReferenceError"),
                     argc: n.args.len() as u32,
                     span: n.span,
                 });
@@ -3871,7 +3878,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                     compile_expression(arg, ctx)?;
                 }
                 ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
-                    builtin: crate::ir::hir::BuiltinId::TypeErr0,
+                    builtin: b("Error", "TypeError"),
                     argc: n.args.len() as u32,
                     span: n.span,
                 });
@@ -3881,7 +3888,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                     compile_expression(arg, ctx)?;
                 }
                 ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
-                    builtin: crate::ir::hir::BuiltinId::RangeErr0,
+                    builtin: b("Error", "RangeError"),
                     argc: n.args.len() as u32,
                     span: n.span,
                 });
@@ -3891,7 +3898,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                     compile_expression(arg, ctx)?;
                 }
                 ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
-                    builtin: crate::ir::hir::BuiltinId::SyntaxErr0,
+                    builtin: b("Error", "SyntaxError"),
                     argc: n.args.len() as u32,
                     span: n.span,
                 });
@@ -3907,7 +3914,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                     compile_expression(arg, ctx)?;
                 }
                 ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
-                    builtin: crate::ir::hir::BuiltinId::Int32Array0,
+                    builtin: b("TypedArray", "Int32Array"),
                     argc: n.args.len() as u32,
                     span: n.span,
                 });
@@ -3917,7 +3924,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                     compile_expression(arg, ctx)?;
                 }
                 ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
-                    builtin: crate::ir::hir::BuiltinId::Uint8Array0,
+                    builtin: b("TypedArray", "Uint8Array"),
                     argc: n.args.len() as u32,
                     span: n.span,
                 });
@@ -3927,7 +3934,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                     compile_expression(arg, ctx)?;
                 }
                 ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
-                    builtin: crate::ir::hir::BuiltinId::Uint8ClampedArray0,
+                    builtin: b("TypedArray", "Uint8ClampedArray"),
                     argc: n.args.len() as u32,
                     span: n.span,
                 });
@@ -3937,7 +3944,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                     compile_expression(arg, ctx)?;
                 }
                 ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
-                    builtin: crate::ir::hir::BuiltinId::ArrayBuffer0,
+                    builtin: b("TypedArray", "ArrayBuffer"),
                     argc: n.args.len() as u32,
                     span: n.span,
                 });
@@ -3947,7 +3954,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                     compile_expression(arg, ctx)?;
                 }
                 ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
-                    builtin: crate::ir::hir::BuiltinId::DataView0,
+                    builtin: b("TypedArray", "DataView"),
                     argc: n.args.len() as u32,
                     span: n.span,
                 });
@@ -3957,7 +3964,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                     compile_expression(arg, ctx)?;
                 }
                 ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
-                    builtin: crate::ir::hir::BuiltinId::RegExp1,
+                    builtin: b("RegExp", "create"),
                     argc: n.args.len() as u32,
                     span: n.span,
                 });
@@ -4060,7 +4067,15 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                 ctx.blocks[ctx.current_block]
                     .ops
                     .push(HirOp::Dup { span: e.span });
-                compile_expression(elem, ctx)?;
+                match elem {
+                    Some(expr) => compile_expression(expr, ctx)?,
+                    None => {
+                        ctx.blocks[ctx.current_block].ops.push(HirOp::LoadConst {
+                            value: HirConst::Undefined,
+                            span: e.span,
+                        });
+                    }
+                }
                 ctx.blocks[ctx.current_block]
                     .ops
                     .push(HirOp::Swap { span: e.span });
@@ -5164,7 +5179,8 @@ if (result !== true) { throw new Test262Error("fail"); }
             }
             pc += 1;
         }
-        let decode_builtin_id = 0xDF;
+        let decode_builtin_id =
+            crate::runtime::builtins::resolve("Global", "decodeURIComponent").expect("decodeURIComponent");
         let mut found_decode_call = false;
         for (call_pc, builtin_id) in &call_builtin_pcs {
             if *builtin_id == decode_builtin_id {

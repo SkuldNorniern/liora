@@ -365,7 +365,7 @@ pub enum ObjectPropertyKey {
 pub struct ArrayLiteralExpr {
     pub id: NodeId,
     pub span: Span,
-    pub elements: Vec<Expression>,
+    pub elements: Vec<Option<Expression>>,
 }
 
 #[derive(Debug, Clone)]

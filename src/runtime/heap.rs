@@ -1,5 +1,10 @@
 use super::Value;
+use crate::runtime::builtins;
 use std::collections::{HashMap, HashSet};
+
+fn b(category: &str, name: &str) -> u8 {
+    builtins::resolve(category, name).unwrap_or_else(|| panic!("builtin {}::{}", category, name))
+}
 
 const MAX_ARRAY_LENGTH: usize = 10_000_000;
 
@@ -20,6 +25,7 @@ pub struct Heap {
     symbols: Vec<Option<String>>,
     error_object_ids: HashSet<usize>,
     global_object_id: usize,
+    array_prototype_id: Option<usize>,
     function_props: HashMap<usize, HashMap<String, Value>>,
 }
 
@@ -35,6 +41,7 @@ impl Default for Heap {
             symbols: Vec::new(),
             error_object_ids: HashSet::new(),
             global_object_id: 0,
+            array_prototype_id: None,
             function_props: HashMap::new(),
         };
         heap.init_globals();
@@ -52,70 +59,91 @@ impl Heap {
         self.global_object_id = global_id;
 
         let obj_id = self.alloc_object();
-        self.set_prop(obj_id, "create", Value::Builtin(0x40));
-        self.set_prop(obj_id, "keys", Value::Builtin(0x41));
-        self.set_prop(obj_id, "assign", Value::Builtin(0x42));
-        self.set_prop(obj_id, "hasOwnProperty", Value::Builtin(0x43));
-        self.set_prop(obj_id, "preventExtensions", Value::Builtin(0x44));
-        self.set_prop(obj_id, "seal", Value::Builtin(0x45));
-        self.set_prop(obj_id, "setPrototypeOf", Value::Builtin(0x46));
-        self.set_prop(obj_id, "propertyIsEnumerable", Value::Builtin(0x47));
-        self.set_prop(obj_id, "getPrototypeOf", Value::Builtin(0x48));
-        self.set_prop(obj_id, "freeze", Value::Builtin(0x49));
-        self.set_prop(obj_id, "isExtensible", Value::Builtin(0x4A));
-        self.set_prop(obj_id, "isFrozen", Value::Builtin(0x4B));
-        self.set_prop(obj_id, "isSealed", Value::Builtin(0x4C));
-        self.set_prop(obj_id, "hasOwn", Value::Builtin(0x4D));
-        self.set_prop(obj_id, "is", Value::Builtin(0x4E));
-        self.set_prop(obj_id, "getOwnPropertyDescriptor", Value::Builtin(0x4F));
-        self.set_prop(obj_id, "getOwnPropertyNames", Value::Builtin(0x57));
-        self.set_prop(obj_id, "defineProperty", Value::Builtin(0x58));
+        self.set_prop(obj_id, "create", Value::Builtin(b("Object", "create")));
+        self.set_prop(obj_id, "keys", Value::Builtin(b("Object", "keys")));
+        self.set_prop(obj_id, "assign", Value::Builtin(b("Object", "assign")));
+        self.set_prop(obj_id, "hasOwnProperty", Value::Builtin(b("Object", "hasOwnProperty")));
+        self.set_prop(obj_id, "preventExtensions", Value::Builtin(b("Object", "preventExtensions")));
+        self.set_prop(obj_id, "seal", Value::Builtin(b("Object", "seal")));
+        self.set_prop(obj_id, "setPrototypeOf", Value::Builtin(b("Object", "setPrototypeOf")));
+        self.set_prop(obj_id, "propertyIsEnumerable", Value::Builtin(b("Object", "propertyIsEnumerable")));
+        self.set_prop(obj_id, "getPrototypeOf", Value::Builtin(b("Object", "getPrototypeOf")));
+        self.set_prop(obj_id, "freeze", Value::Builtin(b("Object", "freeze")));
+        self.set_prop(obj_id, "isExtensible", Value::Builtin(b("Object", "isExtensible")));
+        self.set_prop(obj_id, "isFrozen", Value::Builtin(b("Object", "isFrozen")));
+        self.set_prop(obj_id, "isSealed", Value::Builtin(b("Object", "isSealed")));
+        self.set_prop(obj_id, "hasOwn", Value::Builtin(b("Object", "hasOwn")));
+        self.set_prop(obj_id, "is", Value::Builtin(b("Object", "is")));
+        self.set_prop(obj_id, "getOwnPropertyDescriptor", Value::Builtin(b("Object", "getOwnPropertyDescriptor")));
+        self.set_prop(obj_id, "getOwnPropertyNames", Value::Builtin(b("Object", "getOwnPropertyNames")));
+        self.set_prop(obj_id, "defineProperty", Value::Builtin(b("Object", "defineProperty")));
         self.set_prop(global_id, "Object", Value::Object(obj_id));
 
+        let arr_proto_id = self.alloc_object();
+        self.set_prop(arr_proto_id, "push", Value::Builtin(b("Array", "push")));
+        self.set_prop(arr_proto_id, "pop", Value::Builtin(b("Array", "pop")));
+        self.set_prop(arr_proto_id, "isArray", Value::Builtin(b("Array", "isArray")));
+        self.set_prop(arr_proto_id, "slice", Value::Builtin(b("Array", "slice")));
+        self.set_prop(arr_proto_id, "concat", Value::Builtin(b("Array", "concat")));
+        self.set_prop(arr_proto_id, "indexOf", Value::Builtin(b("Array", "indexOf")));
+        self.set_prop(arr_proto_id, "join", Value::Builtin(b("Array", "join")));
+        self.set_prop(arr_proto_id, "shift", Value::Builtin(b("Array", "shift")));
+        self.set_prop(arr_proto_id, "unshift", Value::Builtin(b("Array", "unshift")));
+        self.set_prop(arr_proto_id, "reverse", Value::Builtin(b("Array", "reverse")));
+        self.set_prop(arr_proto_id, "includes", Value::Builtin(b("Array", "includes")));
+        self.set_prop(arr_proto_id, "fill", Value::Builtin(b("Array", "fill")));
+        self.set_prop(arr_proto_id, "lastIndexOf", Value::Builtin(b("Array", "lastIndexOf")));
+        self.set_prop(arr_proto_id, "toString", Value::Builtin(b("Array", "toString")));
+        self.set_prop(arr_proto_id, "length", Value::Int(0));
+        self.set_prop(arr_proto_id, "map", Value::Builtin(b("Array", "map")));
+        self.set_prop(arr_proto_id, "reduce", Value::Builtin(b("Array", "reduce")));
+        self.set_prop(arr_proto_id, "reduceRight", Value::Builtin(b("Array", "reduceRight")));
+        self.set_prop(arr_proto_id, "some", Value::Builtin(b("Array", "some")));
+        self.set_prop(arr_proto_id, "every", Value::Builtin(b("Array", "every")));
+        self.set_prop(arr_proto_id, "forEach", Value::Builtin(b("Array", "forEach")));
+        self.set_prop(arr_proto_id, "filter", Value::Builtin(b("Array", "filter")));
+        self.set_prop(arr_proto_id, "splice", Value::Builtin(b("Array", "splice")));
+        self.set_prop(arr_proto_id, "sort", Value::Builtin(b("Array", "sort")));
+        self.set_prop(arr_proto_id, "toLocaleString", Value::Builtin(b("Array", "toLocaleString")));
+        self.set_prop(arr_proto_id, "values", Value::Builtin(b("Array", "values")));
+        self.set_prop(arr_proto_id, "keys", Value::Builtin(b("Array", "keys")));
+        self.set_prop(arr_proto_id, "entries", Value::Builtin(b("Array", "entries")));
+        self.array_prototype_id = Some(arr_proto_id);
+
         let arr_id = self.alloc_object();
-        self.set_prop(arr_id, "push", Value::Builtin(0x10));
-        self.set_prop(arr_id, "pop", Value::Builtin(0x11));
-        self.set_prop(arr_id, "isArray", Value::Builtin(0x12));
-        self.set_prop(arr_id, "slice", Value::Builtin(0x13));
-        self.set_prop(arr_id, "concat", Value::Builtin(0x14));
-        self.set_prop(arr_id, "indexOf", Value::Builtin(0x15));
-        self.set_prop(arr_id, "join", Value::Builtin(0x16));
-        self.set_prop(arr_id, "shift", Value::Builtin(0x17));
-        self.set_prop(arr_id, "unshift", Value::Builtin(0x18));
-        self.set_prop(arr_id, "reverse", Value::Builtin(0x19));
-        self.set_prop(arr_id, "includes", Value::Builtin(0x1A));
-        self.set_prop(arr_id, "fill", Value::Builtin(0x1B));
+        self.set_prop(arr_id, "prototype", Value::Object(arr_proto_id));
+        self.set_prop(arr_id, "isArray", Value::Builtin(b("Array", "isArray")));
         self.set_prop(global_id, "Array", Value::Object(arr_id));
 
         let math_id = self.alloc_object();
-        self.set_prop(math_id, "floor", Value::Builtin(0x20));
-        self.set_prop(math_id, "abs", Value::Builtin(0x21));
-        self.set_prop(math_id, "min", Value::Builtin(0x22));
-        self.set_prop(math_id, "max", Value::Builtin(0x23));
-        self.set_prop(math_id, "pow", Value::Builtin(0x24));
-        self.set_prop(math_id, "ceil", Value::Builtin(0x25));
-        self.set_prop(math_id, "round", Value::Builtin(0x26));
-        self.set_prop(math_id, "sqrt", Value::Builtin(0x27));
-        self.set_prop(math_id, "random", Value::Builtin(0x28));
+        self.set_prop(math_id, "floor", Value::Builtin(b("Math", "floor")));
+        self.set_prop(math_id, "abs", Value::Builtin(b("Math", "abs")));
+        self.set_prop(math_id, "min", Value::Builtin(b("Math", "min")));
+        self.set_prop(math_id, "max", Value::Builtin(b("Math", "max")));
+        self.set_prop(math_id, "pow", Value::Builtin(b("Math", "pow")));
+        self.set_prop(math_id, "ceil", Value::Builtin(b("Math", "ceil")));
+        self.set_prop(math_id, "round", Value::Builtin(b("Math", "round")));
+        self.set_prop(math_id, "sqrt", Value::Builtin(b("Math", "sqrt")));
+        self.set_prop(math_id, "random", Value::Builtin(b("Math", "random")));
         self.set_prop(global_id, "Math", Value::Object(math_id));
 
         let json_id = self.alloc_object();
-        self.set_prop(json_id, "parse", Value::Builtin(0x30));
-        self.set_prop(json_id, "stringify", Value::Builtin(0x31));
+        self.set_prop(json_id, "parse", Value::Builtin(b("Json", "parse")));
+        self.set_prop(json_id, "stringify", Value::Builtin(b("Json", "stringify")));
         self.set_prop(global_id, "JSON", Value::Object(json_id));
 
         let str_id = self.alloc_object();
-        self.set_prop(str_id, "split", Value::Builtin(0x60));
-        self.set_prop(str_id, "trim", Value::Builtin(0x61));
-        self.set_prop(str_id, "toLowerCase", Value::Builtin(0x62));
-        self.set_prop(str_id, "toUpperCase", Value::Builtin(0x63));
-        self.set_prop(str_id, "charAt", Value::Builtin(0x64));
-        self.set_prop(str_id, "repeat", Value::Builtin(0x65));
-        self.set_prop(str_id, "fromCharCode", Value::Builtin(0x66));
+        self.set_prop(str_id, "split", Value::Builtin(b("String", "split")));
+        self.set_prop(str_id, "trim", Value::Builtin(b("String", "trim")));
+        self.set_prop(str_id, "toLowerCase", Value::Builtin(b("String", "toLowerCase")));
+        self.set_prop(str_id, "toUpperCase", Value::Builtin(b("String", "toUpperCase")));
+        self.set_prop(str_id, "charAt", Value::Builtin(b("String", "charAt")));
+        self.set_prop(str_id, "repeat", Value::Builtin(b("String", "repeat")));
+        self.set_prop(str_id, "fromCharCode", Value::Builtin(b("String", "fromCharCode")));
         self.set_prop(global_id, "String", Value::Object(str_id));
 
         let num_id = self.alloc_object();
-        self.set_prop(num_id, "__call__", Value::Builtin(0x52));
+        self.set_prop(num_id, "__call__", Value::Builtin(b("Type", "Number")));
         self.set_prop(num_id, "EPSILON", Value::Number(2.0_f64.powi(-52)));
         self.set_prop(
             num_id,
@@ -127,14 +155,14 @@ impl Heap {
             "MAX_SAFE_INTEGER",
             Value::Number(9007199254740991.0),
         );
-        self.set_prop(num_id, "isSafeInteger", Value::Builtin(0x54));
+        self.set_prop(num_id, "isSafeInteger", Value::Builtin(b("Number", "isSafeInteger")));
         self.set_prop(global_id, "Number", Value::Object(num_id));
 
-        self.set_prop(global_id, "Boolean", Value::Builtin(0x53));
+        self.set_prop(global_id, "Boolean", Value::Builtin(b("Type", "Boolean")));
 
         let err_id = self.alloc_object();
-        self.set_prop(err_id, "isError", Value::Builtin(0x70));
-        self.set_prop(err_id, "__call__", Value::Builtin(0x51));
+        self.set_prop(err_id, "isError", Value::Builtin(b("Error", "isError")));
+        self.set_prop(err_id, "__call__", Value::Builtin(b("Type", "Error")));
         self.set_prop(global_id, "Error", Value::Object(err_id));
 
         let ref_err_id = self.alloc_object();
@@ -143,12 +171,12 @@ impl Heap {
             "name",
             Value::String("ReferenceError".to_string()),
         );
-        self.set_prop(ref_err_id, "__call__", Value::Builtin(0x51));
+        self.set_prop(ref_err_id, "__call__", Value::Builtin(b("Type", "Error")));
         self.set_prop(global_id, "ReferenceError", Value::Object(ref_err_id));
 
         let type_err_id = self.alloc_object();
         self.set_prop(type_err_id, "name", Value::String("TypeError".to_string()));
-        self.set_prop(type_err_id, "__call__", Value::Builtin(0x51));
+        self.set_prop(type_err_id, "__call__", Value::Builtin(b("Type", "Error")));
         self.set_prop(global_id, "TypeError", Value::Object(type_err_id));
 
         let range_err_id = self.alloc_object();
@@ -157,7 +185,7 @@ impl Heap {
             "name",
             Value::String("RangeError".to_string()),
         );
-        self.set_prop(range_err_id, "__call__", Value::Builtin(0x51));
+        self.set_prop(range_err_id, "__call__", Value::Builtin(b("Type", "Error")));
         self.set_prop(global_id, "RangeError", Value::Object(range_err_id));
 
         let syntax_err_id = self.alloc_object();
@@ -166,17 +194,17 @@ impl Heap {
             "name",
             Value::String("SyntaxError".to_string()),
         );
-        self.set_prop(syntax_err_id, "__call__", Value::Builtin(0x51));
+        self.set_prop(syntax_err_id, "__call__", Value::Builtin(b("Type", "Error")));
         self.set_prop(global_id, "SyntaxError", Value::Object(syntax_err_id));
 
         let uri_err_id = self.alloc_object();
         self.set_prop(uri_err_id, "name", Value::String("URIError".to_string()));
-        self.set_prop(uri_err_id, "__call__", Value::Builtin(0x51));
+        self.set_prop(uri_err_id, "__call__", Value::Builtin(b("Type", "Error")));
         self.set_prop(global_id, "URIError", Value::Object(uri_err_id));
 
         let eval_err_id = self.alloc_object();
         self.set_prop(eval_err_id, "name", Value::String("EvalError".to_string()));
-        self.set_prop(eval_err_id, "__call__", Value::Builtin(0x51));
+        self.set_prop(eval_err_id, "__call__", Value::Builtin(b("Type", "Error")));
         self.set_prop(global_id, "EvalError", Value::Object(eval_err_id));
 
         let aggregate_err_id = self.alloc_object();
@@ -185,71 +213,72 @@ impl Heap {
             "name",
             Value::String("AggregateError".to_string()),
         );
-        self.set_prop(aggregate_err_id, "__call__", Value::Builtin(0x51));
+        self.set_prop(aggregate_err_id, "__call__", Value::Builtin(b("Type", "Error")));
         self.set_prop(global_id, "AggregateError", Value::Object(aggregate_err_id));
 
         let regexp_id = self.alloc_object();
-        self.set_prop(regexp_id, "escape", Value::Builtin(0x80));
-        self.set_prop(regexp_id, "__call__", Value::Builtin(0x81));
+        self.set_prop(regexp_id, "escape", Value::Builtin(b("RegExp", "escape")));
+        self.set_prop(regexp_id, "__call__", Value::Builtin(b("RegExp", "create")));
         self.set_prop(global_id, "RegExp", Value::Object(regexp_id));
 
         let map_id = self.alloc_object();
-        self.set_prop(map_id, "set", Value::Builtin(0x91));
-        self.set_prop(map_id, "get", Value::Builtin(0x92));
-        self.set_prop(map_id, "has", Value::Builtin(0x93));
+        self.set_prop(map_id, "set", Value::Builtin(b("Map", "set")));
+        self.set_prop(map_id, "get", Value::Builtin(b("Map", "get")));
+        self.set_prop(map_id, "has", Value::Builtin(b("Map", "has")));
         self.set_prop(global_id, "Map", Value::Object(map_id));
 
         let set_id = self.alloc_object();
-        self.set_prop(set_id, "add", Value::Builtin(0xA1));
-        self.set_prop(set_id, "has", Value::Builtin(0xA2));
-        self.set_prop(set_id, "size", Value::Builtin(0xA3));
+        self.set_prop(set_id, "add", Value::Builtin(b("Set", "add")));
+        self.set_prop(set_id, "has", Value::Builtin(b("Set", "has")));
+        self.set_prop(set_id, "size", Value::Builtin(b("Set", "size")));
         self.set_prop(global_id, "Set", Value::Object(set_id));
 
         let date_id = self.alloc_object();
-        self.set_prop(date_id, "now", Value::Builtin(0xC1));
-        self.set_prop(date_id, "getTime", Value::Builtin(0xC2));
-        self.set_prop(date_id, "toString", Value::Builtin(0xC3));
-        self.set_prop(date_id, "toISOString", Value::Builtin(0xC4));
+        self.set_prop(date_id, "now", Value::Builtin(b("Date", "now")));
+        self.set_prop(date_id, "getTime", Value::Builtin(b("Date", "getTime")));
+        self.set_prop(date_id, "toString", Value::Builtin(b("Date", "toString")));
+        self.set_prop(date_id, "toISOString", Value::Builtin(b("Date", "toISOString")));
         self.set_prop(global_id, "Date", Value::Object(date_id));
 
         self.set_prop(global_id, "NaN", Value::Number(f64::NAN));
         self.set_prop(global_id, "Infinity", Value::Number(f64::INFINITY));
         self.set_prop(global_id, "globalThis", Value::Object(global_id));
-        self.set_prop(global_id, "Symbol", Value::Builtin(0xD0));
+        self.set_prop(global_id, "Symbol", Value::Builtin(b("Symbol", "create")));
 
         let console_id = self.alloc_object();
-        self.set_prop(console_id, "log", Value::Builtin(0x00));
+        self.set_prop(console_id, "log", Value::Builtin(b("Host", "print")));
         self.set_prop(global_id, "console", Value::Object(console_id));
 
-        self.set_prop(global_id, "print", Value::Builtin(0x00));
-        self.set_prop(global_id, "eval", Value::Builtin(0xD9));
-        self.set_prop(global_id, "encodeURI", Value::Builtin(0xDA));
-        self.set_prop(global_id, "encodeURIComponent", Value::Builtin(0xDB));
-        self.set_prop(global_id, "decodeURI", Value::Builtin(0xDE));
-        self.set_prop(global_id, "decodeURIComponent", Value::Builtin(0xDF));
-        self.set_prop(global_id, "parseInt", Value::Builtin(0xDC));
-        self.set_prop(global_id, "parseFloat", Value::Builtin(0xDD));
-        self.set_prop(global_id, "escape", Value::Builtin(0xEB));
-        self.set_prop(global_id, "unescape", Value::Builtin(0xEC));
-        self.set_prop(global_id, "Int32Array", Value::Builtin(0xE0));
-        self.set_prop(global_id, "Int8Array", Value::Builtin(0xE0));
-        self.set_prop(global_id, "Int16Array", Value::Builtin(0xE0));
-        self.set_prop(global_id, "Uint8Array", Value::Builtin(0xE1));
-        self.set_prop(global_id, "Uint8ClampedArray", Value::Builtin(0xE2));
-        self.set_prop(global_id, "Uint16Array", Value::Builtin(0xE0));
-        self.set_prop(global_id, "Uint32Array", Value::Builtin(0xE0));
-        self.set_prop(global_id, "Float32Array", Value::Builtin(0xE0));
-        self.set_prop(global_id, "Float64Array", Value::Builtin(0xE0));
-        self.set_prop(global_id, "Float16Array", Value::Builtin(0xE0));
-        self.set_prop(global_id, "BigInt64Array", Value::Builtin(0xE0));
-        self.set_prop(global_id, "BigUint64Array", Value::Builtin(0xE0));
-        self.set_prop(global_id, "ArrayBuffer", Value::Builtin(0xE3));
-        self.set_prop(global_id, "Function", Value::Builtin(0xE4));
-        self.set_prop(global_id, "isNaN", Value::Builtin(0xE5));
-        self.set_prop(global_id, "isFinite", Value::Builtin(0xE6));
+        self.set_prop(global_id, "print", Value::Builtin(b("Host", "print")));
+        self.set_prop(global_id, "eval", Value::Builtin(b("Global", "eval")));
+        self.set_prop(global_id, "encodeURI", Value::Builtin(b("Global", "encodeURI")));
+        self.set_prop(global_id, "encodeURIComponent", Value::Builtin(b("Global", "encodeURIComponent")));
+        self.set_prop(global_id, "decodeURI", Value::Builtin(b("Global", "decodeURI")));
+        self.set_prop(global_id, "decodeURIComponent", Value::Builtin(b("Global", "decodeURIComponent")));
+        self.set_prop(global_id, "parseInt", Value::Builtin(b("Global", "parseInt")));
+        self.set_prop(global_id, "parseFloat", Value::Builtin(b("Global", "parseFloat")));
+        self.set_prop(global_id, "escape", Value::Builtin(b("Global", "escape")));
+        self.set_prop(global_id, "unescape", Value::Builtin(b("Global", "unescape")));
+        let int32array = b("TypedArray", "Int32Array");
+        self.set_prop(global_id, "Int32Array", Value::Builtin(int32array));
+        self.set_prop(global_id, "Int8Array", Value::Builtin(int32array));
+        self.set_prop(global_id, "Int16Array", Value::Builtin(int32array));
+        self.set_prop(global_id, "Uint8Array", Value::Builtin(b("TypedArray", "Uint8Array")));
+        self.set_prop(global_id, "Uint8ClampedArray", Value::Builtin(b("TypedArray", "Uint8ClampedArray")));
+        self.set_prop(global_id, "Uint16Array", Value::Builtin(int32array));
+        self.set_prop(global_id, "Uint32Array", Value::Builtin(int32array));
+        self.set_prop(global_id, "Float32Array", Value::Builtin(int32array));
+        self.set_prop(global_id, "Float64Array", Value::Builtin(int32array));
+        self.set_prop(global_id, "Float16Array", Value::Builtin(int32array));
+        self.set_prop(global_id, "BigInt64Array", Value::Builtin(int32array));
+        self.set_prop(global_id, "BigUint64Array", Value::Builtin(int32array));
+        self.set_prop(global_id, "ArrayBuffer", Value::Builtin(b("TypedArray", "ArrayBuffer")));
+        self.set_prop(global_id, "Function", Value::Builtin(b("Global", "Function")));
+        self.set_prop(global_id, "isNaN", Value::Builtin(b("Global", "isNaN")));
+        self.set_prop(global_id, "isFinite", Value::Builtin(b("Global", "isFinite")));
         let reflect_id = self.alloc_object();
-        self.set_prop(reflect_id, "apply", Value::Builtin(0xE7));
-        self.set_prop(reflect_id, "construct", Value::Builtin(0xE8));
+        self.set_prop(reflect_id, "apply", Value::Builtin(b("Reflect", "apply")));
+        self.set_prop(reflect_id, "construct", Value::Builtin(b("Reflect", "construct")));
         self.set_prop(global_id, "Reflect", Value::Object(reflect_id));
         let weakmap_id = self.alloc_object();
         self.set_prop(global_id, "WeakMap", Value::Object(weakmap_id));
@@ -463,6 +492,14 @@ impl Heap {
                     }
                 }
             }
+            if let Some(props) = self.array_props.get(arr_id) {
+                if let Some(v) = props.get(key) {
+                    return v.clone();
+                }
+            }
+        }
+        if let Some(proto_id) = self.array_prototype_id {
+            return self.get_prop(proto_id, key);
         }
         Value::Undefined
     }
@@ -584,6 +621,12 @@ impl Heap {
             for i in start..end {
                 elements[i] = value.clone();
             }
+        }
+    }
+
+    pub fn array_splice(&mut self, arr_id: usize, elements: Vec<Value>) {
+        if let Some(arr) = self.arrays.get_mut(arr_id) {
+            *arr = elements;
         }
     }
 
