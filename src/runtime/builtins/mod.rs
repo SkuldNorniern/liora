@@ -459,6 +459,11 @@ const BUILTINS: &[BuiltinDef] = &[
         name: "of",
         entry: BuiltinEntry::Normal(array::array_of),
     },
+    BuiltinDef {
+        category: "Array",
+        name: "create",
+        entry: BuiltinEntry::Normal(array::array_create),
+    },
     // Math 0..8
     BuiltinDef {
         category: "Math",

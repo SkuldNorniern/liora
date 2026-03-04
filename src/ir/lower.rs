@@ -3114,6 +3114,79 @@ fn compile_assign_to_lhs(
     }
 }
 
+fn expr_to_binding_for_assign(expr: &Expression) -> Option<Binding> {
+    use crate::frontend::ast::{ObjectPatternTarget, ObjectPatternProp, ArrayPatternElem};
+    match expr {
+        Expression::ObjectLiteral(obj) => {
+            let mut props = Vec::new();
+            for po in &obj.properties {
+                let ObjectPropertyOrSpread::Property(p) = po else {
+                    return None;
+                };
+                let key_str = match &p.key {
+                    ObjectPropertyKey::Static(s) => s.clone(),
+                    ObjectPropertyKey::Computed(_) => return None,
+                };
+                let (target, shorthand) = match &p.value {
+                    Expression::Identifier(id) => {
+                        (ObjectPatternTarget::Ident(id.name.clone()), key_str == id.name)
+                    }
+                    Expression::ObjectLiteral(inner) => {
+                        let b = expr_to_binding_for_assign(&Expression::ObjectLiteral(inner.clone()))?;
+                        (ObjectPatternTarget::Pattern(Box::new(b)), false)
+                    }
+                    Expression::ArrayLiteral(inner) => {
+                        let b = expr_to_binding_for_assign(&Expression::ArrayLiteral(inner.clone()))?;
+                        (ObjectPatternTarget::Pattern(Box::new(b)), false)
+                    }
+                    _ => return None,
+                };
+                props.push(ObjectPatternProp {
+                    key: key_str,
+                    target,
+                    shorthand,
+                    default_init: None,
+                });
+            }
+            Some(Binding::ObjectPattern(props))
+        }
+        Expression::ArrayLiteral(arr) => {
+            let mut elems = Vec::new();
+            for el in &arr.elements {
+                match el {
+                    ArrayElement::Expr(Expression::Identifier(id)) => {
+                        elems.push(ArrayPatternElem {
+                            binding: Some(id.name.clone()),
+                            default_init: None,
+                            rest: false,
+                        });
+                    }
+                    ArrayElement::Expr(Expression::ObjectLiteral(_)) | ArrayElement::Expr(Expression::ArrayLiteral(_)) => {
+                        return None;
+                    }
+                    ArrayElement::Hole => {
+                        elems.push(ArrayPatternElem {
+                            binding: None,
+                            default_init: None,
+                            rest: false,
+                        });
+                    }
+                    ArrayElement::Spread(Expression::Identifier(id)) => {
+                        elems.push(ArrayPatternElem {
+                            binding: Some(id.name.clone()),
+                            default_init: None,
+                            rest: true,
+                        });
+                    }
+                    _ => return None,
+                }
+            }
+            Some(Binding::ArrayPattern(elems))
+        }
+        _ => None,
+    }
+}
+
 fn alloc_slot(ctx: &mut LowerCtx<'_>) -> u32 {
     let s = ctx.next_slot;
     ctx.next_slot += 1;
@@ -4355,6 +4428,34 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                             .ops
                             .push(HirOp::SetPropDyn { span: e.span });
                     }
+                }
+            }
+            Expression::ObjectLiteral(_) | Expression::ArrayLiteral(_) => {
+                if let Some(binding) = expr_to_binding_for_assign(e.left.as_ref()) {
+                    compile_expression(&e.right, ctx)?;
+                    let src_slot = ctx.next_slot;
+                    ctx.next_slot += 1;
+                    ctx.blocks[ctx.current_block].ops.push(HirOp::StoreLocal {
+                        id: src_slot,
+                        span: e.span,
+                    });
+                    compile_binding_from_slot(
+                        &binding,
+                        src_slot,
+                        BindingStoreMode::AssignExisting,
+                        "assignment to undefined variable '{}'",
+                        e.span,
+                        ctx,
+                    )?;
+                    ctx.blocks[ctx.current_block].ops.push(HirOp::LoadLocal {
+                        id: src_slot,
+                        span: e.span,
+                    });
+                } else {
+                    return Err(LowerError::Unsupported(
+                        "assignment to unsupported target".to_string(),
+                        Some(e.span),
+                    ));
                 }
             }
             _ => {
@@ -6548,6 +6649,21 @@ mod tests {
         )
         .expect("run");
         assert_eq!(result, 30, "array destructuring");
+    }
+
+    #[test]
+    fn lower_destructuring_assignment() {
+        let result = crate::driver::Driver::run(
+            "function main() { var a, b; var o = { a: 1, b: 2 }; ({ a, b } = o); return a + b; }",
+        )
+        .expect("run");
+        assert_eq!(result, 3, "object destructuring assignment");
+
+        let result = crate::driver::Driver::run(
+            "function main() { var x, y; var arr = [10, 20]; [x, y] = arr; return x + y; }",
+        )
+        .expect("run");
+        assert_eq!(result, 30, "array destructuring assignment");
     }
 
     #[test]

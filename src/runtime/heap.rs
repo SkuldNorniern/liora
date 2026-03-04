@@ -324,6 +324,7 @@ impl Heap {
         self.set_prop(arr_id, "isArray", Value::Builtin(b("Array", "isArray")));
         self.set_prop(arr_id, "from", Value::Builtin(b("Array", "from")));
         self.set_prop(arr_id, "of", Value::Builtin(b("Array", "of")));
+        self.set_prop(arr_id, "__call__", Value::Builtin(b("Array", "create")));
         self.set_prop(global_id, "Array", Value::Object(arr_id));
 
         let math_id = self.alloc_object();

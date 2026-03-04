@@ -925,7 +925,28 @@ pub fn array_from(args: &[Value], heap: &mut Heap) -> Value {
 
 pub fn array_of(args: &[Value], heap: &mut Heap) -> Value {
     let arr_id = heap.alloc_array();
-    for v in args {
+    for v in args.iter().skip(1) {
+        heap.array_push(arr_id, v.clone());
+    }
+    Value::Array(arr_id)
+}
+
+pub fn array_create(args: &[Value], heap: &mut Heap) -> Value {
+    let arr_id = heap.alloc_array();
+    if args.len() <= 1 {
+        return Value::Array(arr_id);
+    }
+    if args.len() == 2 {
+        let n = to_number(&args[1]);
+        if n.fract() == 0.0 && n >= 0.0 && n <= 10_000_000.0 {
+            let len = n as usize;
+            for _ in 0..len {
+                heap.array_push(arr_id, Value::Undefined);
+            }
+            return Value::Array(arr_id);
+        }
+    }
+    for v in args.iter().skip(1) {
         heap.array_push(arr_id, v.clone());
     }
     Value::Array(arr_id)

@@ -347,6 +347,15 @@ mod tests {
     }
 
     #[test]
+    fn run_array_constructor_callable() {
+        let r = Driver::run(
+            "function main() { var a = Array(4); a[0] = 10; return a.length === 4 && a[0] === 10 ? 1 : 0; }",
+        );
+        assert!(r.is_ok(), "Array(4) should succeed: {:?}", r);
+        assert_eq!(r.unwrap(), 1, "Array(n) creates array of length n");
+    }
+
+    #[test]
     fn run_is_html_dda_callable_returns_null() {
         let r = Driver::run_with_timeout_and_cancel(
             "function main() { return $262.IsHTMLDDA() === null ? 1 : 0; }",
