@@ -2743,10 +2743,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                     BinaryOp::LogicalAnd
                     | BinaryOp::LogicalOr
                     | BinaryOp::NullishCoalescing => {
-                        return Err(LowerError::Unsupported(
-                            format!("binary op {:?} not yet supported", e.op),
-                            Some(e.span),
-                        ));
+                        unreachable!("logical ops handled in outer match")
                     }
                 }
             }
@@ -4579,18 +4576,77 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
         }
         Expression::Member(e) => {
             compile_expression(&e.object, ctx)?;
-            match &e.property {
-                MemberProperty::Identifier(key) => {
-                    ctx.blocks[ctx.current_block].ops.push(HirOp::GetProp {
-                        key: key.clone(),
+            if e.optional {
+                let obj_slot = ctx.next_slot;
+                ctx.next_slot += 1;
+                ctx.blocks[ctx.current_block].ops.push(HirOp::StoreLocal {
+                    id: obj_slot,
+                    span: e.span,
+                });
+                let nullish_block_id = ctx.blocks.len() as HirBlockId;
+                ctx.blocks.push(HirBlock {
+                    id: nullish_block_id,
+                    ops: vec![HirOp::LoadConst {
+                        value: HirConst::Undefined,
                         span: e.span,
-                    });
+                    }],
+                    terminator: HirTerminator::Jump { target: 0 },
+                });
+                let prop_block_id = ctx.blocks.len() as HirBlockId;
+                ctx.blocks.push(HirBlock {
+                    id: prop_block_id,
+                    ops: Vec::new(),
+                    terminator: HirTerminator::Jump { target: 0 },
+                });
+                let merge_block_id = ctx.blocks.len() as HirBlockId;
+                ctx.blocks.push(HirBlock {
+                    id: merge_block_id,
+                    ops: Vec::new(),
+                    terminator: HirTerminator::Jump { target: 0 },
+                });
+                ctx.blocks[ctx.current_block].terminator = HirTerminator::BranchNullish {
+                    cond: obj_slot,
+                    then_block: nullish_block_id,
+                    else_block: prop_block_id,
+                };
+                ctx.blocks[nullish_block_id as usize].terminator =
+                    HirTerminator::Jump { target: merge_block_id };
+                ctx.current_block = prop_block_id as usize;
+                ctx.blocks[ctx.current_block].ops.push(HirOp::LoadLocal {
+                    id: obj_slot,
+                    span: e.span,
+                });
+                match &e.property {
+                    MemberProperty::Identifier(key) => {
+                        ctx.blocks[ctx.current_block].ops.push(HirOp::GetProp {
+                            key: key.clone(),
+                            span: e.span,
+                        });
+                    }
+                    MemberProperty::Expression(key_expr) => {
+                        compile_expression(key_expr, ctx)?;
+                        ctx.blocks[ctx.current_block]
+                            .ops
+                            .push(HirOp::GetPropDyn { span: e.span });
+                    }
                 }
-                MemberProperty::Expression(key_expr) => {
-                    compile_expression(key_expr, ctx)?;
-                    ctx.blocks[ctx.current_block]
-                        .ops
-                        .push(HirOp::GetPropDyn { span: e.span });
+                ctx.blocks[ctx.current_block].terminator =
+                    HirTerminator::Jump { target: merge_block_id };
+                ctx.current_block = merge_block_id as usize;
+            } else {
+                match &e.property {
+                    MemberProperty::Identifier(key) => {
+                        ctx.blocks[ctx.current_block].ops.push(HirOp::GetProp {
+                            key: key.clone(),
+                            span: e.span,
+                        });
+                    }
+                    MemberProperty::Expression(key_expr) => {
+                        compile_expression(key_expr, ctx)?;
+                        ctx.blocks[ctx.current_block]
+                            .ops
+                            .push(HirOp::GetPropDyn { span: e.span });
+                    }
                 }
             }
         }

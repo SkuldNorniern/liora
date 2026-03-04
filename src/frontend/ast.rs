@@ -405,6 +405,7 @@ pub struct MemberExpr {
     pub span: Span,
     pub object: Box<Expression>,
     pub property: MemberProperty,
+    pub optional: bool,
 }
 
 #[derive(Debug, Clone)]

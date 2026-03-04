@@ -1740,6 +1740,186 @@ impl Parser {
                         right: Box::new(pow_right),
                     }));
                 }
+                Some(TokenType::MinusAssign) => {
+                    self.end_recursion();
+                    let left_span = left.span();
+                    self.advance();
+                    let right = self.parse_expression_prec(2)?;
+                    let span = left_span.merge(right.span());
+                    let op_right = Expression::Binary(BinaryExpr {
+                        id: self.next_id(),
+                        span,
+                        op: BinaryOp::Sub,
+                        left: Box::new(left.clone()),
+                        right: Box::new(right),
+                    });
+                    return Ok(Expression::Assign(AssignExpr {
+                        id: self.next_id(),
+                        span,
+                        left: Box::new(left),
+                        right: Box::new(op_right),
+                    }));
+                }
+                Some(TokenType::MultiplyAssign) => {
+                    self.end_recursion();
+                    let left_span = left.span();
+                    self.advance();
+                    let right = self.parse_expression_prec(2)?;
+                    let span = left_span.merge(right.span());
+                    let op_right = Expression::Binary(BinaryExpr {
+                        id: self.next_id(),
+                        span,
+                        op: BinaryOp::Mul,
+                        left: Box::new(left.clone()),
+                        right: Box::new(right),
+                    });
+                    return Ok(Expression::Assign(AssignExpr {
+                        id: self.next_id(),
+                        span,
+                        left: Box::new(left),
+                        right: Box::new(op_right),
+                    }));
+                }
+                Some(TokenType::DivideAssign) => {
+                    self.end_recursion();
+                    let left_span = left.span();
+                    self.advance();
+                    let right = self.parse_expression_prec(2)?;
+                    let span = left_span.merge(right.span());
+                    let op_right = Expression::Binary(BinaryExpr {
+                        id: self.next_id(),
+                        span,
+                        op: BinaryOp::Div,
+                        left: Box::new(left.clone()),
+                        right: Box::new(right),
+                    });
+                    return Ok(Expression::Assign(AssignExpr {
+                        id: self.next_id(),
+                        span,
+                        left: Box::new(left),
+                        right: Box::new(op_right),
+                    }));
+                }
+                Some(TokenType::ModuloAssign) => {
+                    self.end_recursion();
+                    let left_span = left.span();
+                    self.advance();
+                    let right = self.parse_expression_prec(2)?;
+                    let span = left_span.merge(right.span());
+                    let op_right = Expression::Binary(BinaryExpr {
+                        id: self.next_id(),
+                        span,
+                        op: BinaryOp::Mod,
+                        left: Box::new(left.clone()),
+                        right: Box::new(right),
+                    });
+                    return Ok(Expression::Assign(AssignExpr {
+                        id: self.next_id(),
+                        span,
+                        left: Box::new(left),
+                        right: Box::new(op_right),
+                    }));
+                }
+                Some(TokenType::LeftShiftAssign) => {
+                    self.end_recursion();
+                    let left_span = left.span();
+                    self.advance();
+                    let right = self.parse_expression_prec(2)?;
+                    let span = left_span.merge(right.span());
+                    let op_right = Expression::Binary(BinaryExpr {
+                        id: self.next_id(),
+                        span,
+                        op: BinaryOp::LeftShift,
+                        left: Box::new(left.clone()),
+                        right: Box::new(right),
+                    });
+                    return Ok(Expression::Assign(AssignExpr {
+                        id: self.next_id(),
+                        span,
+                        left: Box::new(left),
+                        right: Box::new(op_right),
+                    }));
+                }
+                Some(TokenType::RightShiftAssign) => {
+                    self.end_recursion();
+                    let left_span = left.span();
+                    self.advance();
+                    let right = self.parse_expression_prec(2)?;
+                    let span = left_span.merge(right.span());
+                    let op_right = Expression::Binary(BinaryExpr {
+                        id: self.next_id(),
+                        span,
+                        op: BinaryOp::RightShift,
+                        left: Box::new(left.clone()),
+                        right: Box::new(right),
+                    });
+                    return Ok(Expression::Assign(AssignExpr {
+                        id: self.next_id(),
+                        span,
+                        left: Box::new(left),
+                        right: Box::new(op_right),
+                    }));
+                }
+                Some(TokenType::BitwiseAndAssign) => {
+                    self.end_recursion();
+                    let left_span = left.span();
+                    self.advance();
+                    let right = self.parse_expression_prec(2)?;
+                    let span = left_span.merge(right.span());
+                    let op_right = Expression::Binary(BinaryExpr {
+                        id: self.next_id(),
+                        span,
+                        op: BinaryOp::BitwiseAnd,
+                        left: Box::new(left.clone()),
+                        right: Box::new(right),
+                    });
+                    return Ok(Expression::Assign(AssignExpr {
+                        id: self.next_id(),
+                        span,
+                        left: Box::new(left),
+                        right: Box::new(op_right),
+                    }));
+                }
+                Some(TokenType::BitwiseXorAssign) => {
+                    self.end_recursion();
+                    let left_span = left.span();
+                    self.advance();
+                    let right = self.parse_expression_prec(2)?;
+                    let span = left_span.merge(right.span());
+                    let op_right = Expression::Binary(BinaryExpr {
+                        id: self.next_id(),
+                        span,
+                        op: BinaryOp::BitwiseXor,
+                        left: Box::new(left.clone()),
+                        right: Box::new(right),
+                    });
+                    return Ok(Expression::Assign(AssignExpr {
+                        id: self.next_id(),
+                        span,
+                        left: Box::new(left),
+                        right: Box::new(op_right),
+                    }));
+                }
+                Some(TokenType::BitwiseOrAssign) => {
+                    self.end_recursion();
+                    let left_span = left.span();
+                    self.advance();
+                    let right = self.parse_expression_prec(2)?;
+                    let span = left_span.merge(right.span());
+                    let op_right = Expression::Binary(BinaryExpr {
+                        id: self.next_id(),
+                        span,
+                        op: BinaryOp::BitwiseOr,
+                        left: Box::new(left.clone()),
+                        right: Box::new(right),
+                    });
+                    return Ok(Expression::Assign(AssignExpr {
+                        id: self.next_id(),
+                        span,
+                        left: Box::new(left),
+                        right: Box::new(op_right),
+                    }));
+                }
                 Some(TokenType::UnsignedRightShiftAssign) => {
                     self.end_recursion();
                     let left_span = left.span();
@@ -1883,6 +2063,7 @@ impl Parser {
                                 span,
                                 object: Box::new(callee),
                                 property: MemberProperty::Identifier(prop_tok.lexeme.clone()),
+                                optional: false,
                             });
                         } else if matches!(
                             self.current().map(|t| &t.token_type),
@@ -1898,6 +2079,7 @@ impl Parser {
                                 span,
                                 object: Box::new(callee),
                                 property: MemberProperty::Expression(Box::new(index)),
+                                optional: false,
                             });
                         } else {
                             break;
@@ -1984,7 +2166,32 @@ impl Parser {
                     callee: Box::new(expr),
                     args,
                 });
-            } else if matches!(self.current().map(|t| &t.token_type), Some(TokenType::Dot)) {
+            } else if matches!(
+                self.current().map(|t| &t.token_type),
+                Some(TokenType::OptionalChaining)
+            ) && matches!(self.peek(), Some(TokenType::LeftBracket))
+            {
+                let start_span = expr.span();
+                self.advance();
+                self.expect(TokenType::LeftBracket)?;
+                let index = self.parse_expression()?;
+                let end_tok = self.expect(TokenType::RightBracket)?;
+                let span = start_span.merge(end_tok.span);
+                expr = Expression::Member(MemberExpr {
+                    id: self.next_id(),
+                    span,
+                    object: Box::new(expr),
+                    property: MemberProperty::Expression(Box::new(index)),
+                    optional: true,
+                });
+            } else if matches!(
+                self.current().map(|t| &t.token_type),
+                Some(TokenType::Dot) | Some(TokenType::OptionalChaining)
+            ) {
+                let optional = matches!(
+                    self.current().map(|t| &t.token_type),
+                    Some(TokenType::OptionalChaining)
+                );
                 let start_span = expr.span();
                 self.advance();
                 let prop_tok = self.expect_property_name()?;
@@ -1995,6 +2202,7 @@ impl Parser {
                     span,
                     object: Box::new(expr),
                     property: MemberProperty::Identifier(prop),
+                    optional,
                 });
             } else if matches!(
                 self.current().map(|t| &t.token_type),
@@ -2010,6 +2218,7 @@ impl Parser {
                     span,
                     object: Box::new(expr),
                     property: MemberProperty::Expression(Box::new(index)),
+                    optional: false,
                 });
             } else if matches!(
                 self.current().map(|t| &t.token_type),

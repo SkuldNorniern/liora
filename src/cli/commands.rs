@@ -306,14 +306,18 @@ fn format_expr(expr: &Expression) -> String {
                 .collect();
             format!("[{}]", elems.join(", "))
         }
-        Expression::Member(e) => match &e.property {
-            crate::frontend::ast::MemberProperty::Identifier(s) => {
-                format!("{}.{}", format_expr(&e.object), s)
+        Expression::Member(e) => {
+            let op = if e.optional { "?." } else { "." };
+            match &e.property {
+                crate::frontend::ast::MemberProperty::Identifier(s) => {
+                    format!("{}{}{}", format_expr(&e.object), op, s)
+                }
+                crate::frontend::ast::MemberProperty::Expression(inner) => {
+                    let bracket = if e.optional { "?." } else { "" };
+                    format!("{}{}[{}]", format_expr(&e.object), bracket, format_expr(inner))
+                }
             }
-            crate::frontend::ast::MemberProperty::Expression(inner) => {
-                format!("{}[{}]", format_expr(&e.object), format_expr(inner))
-            }
-        },
+        }
         Expression::FunctionExpr(e) => {
             format!("function {}()", e.name.as_deref().unwrap_or(""))
         }
