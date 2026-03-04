@@ -4,14 +4,43 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use super::{number_to_value, to_number};
 
 pub fn create(args: &[Value], heap: &mut Heap) -> Value {
-    let ms = match args.first() {
-        None => SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_millis() as f64)
-            .unwrap_or(0.0),
-        Some(Value::Int(n)) => *n as f64,
-        Some(Value::Number(n)) => *n,
-        Some(v) => to_number(v),
+    let ms = if args.len() >= 2 {
+        let y = super::to_number(args.get(0).unwrap_or(&Value::Number(0.0))) as i32;
+        let mo = super::to_number(args.get(1).unwrap_or(&Value::Number(0.0))) as i32;
+        let d = args
+            .get(2)
+            .map(|v| super::to_number(v) as i32)
+            .unwrap_or(1)
+            .clamp(1, 31);
+        let h = args
+            .get(3)
+            .map(|v| super::to_number(v) as i32)
+            .unwrap_or(0);
+        let m = args
+            .get(4)
+            .map(|v| super::to_number(v) as i32)
+            .unwrap_or(0);
+        let s = args
+            .get(5)
+            .map(|v| super::to_number(v) as i32)
+            .unwrap_or(0);
+        let ms_arg = args
+            .get(6)
+            .map(|v| super::to_number(v))
+            .unwrap_or(0.0);
+        let mo_1_12 = (mo % 12 + 12) % 12 + 1;
+        let days = ymd_to_days(y, mo_1_12, d);
+        (days * 86400 + h as i64 * 3600 + m as i64 * 60 + s as i64) as f64 * 1000.0 + ms_arg
+    } else {
+        match args.first() {
+            None => SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_millis() as f64)
+                .unwrap_or(0.0),
+            Some(Value::Int(n)) => *n as f64,
+            Some(Value::Number(n)) => *n,
+            Some(v) => to_number(v),
+        }
     };
     let id = heap.alloc_date(ms);
     Value::Date(id)
@@ -154,6 +183,21 @@ pub fn get_year(args: &[Value], heap: &mut Heap) -> Value {
     let days = secs / 86400;
     let (y, _, _) = days_to_ymd(days);
     Value::Number((y - 1900) as f64)
+}
+
+pub fn get_full_year(args: &[Value], heap: &mut Heap) -> Value {
+    let id = match args.first().and_then(Value::as_date_id) {
+        Some(i) => i,
+        None => return Value::Number(f64::NAN),
+    };
+    let ms = heap.date_timestamp(id);
+    if !ms.is_finite() {
+        return Value::Number(f64::NAN);
+    }
+    let secs = (ms / 1000.0) as i64;
+    let days = secs / 86400;
+    let (y, _, _) = days_to_ymd(days);
+    Value::Number(y as f64)
 }
 
 pub fn set_year(args: &[Value], heap: &mut Heap) -> Value {

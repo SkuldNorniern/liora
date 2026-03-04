@@ -31,6 +31,13 @@ pub enum Statement {
     Throw(ThrowStmt),
     Try(TryStmt),
     Switch(SwitchStmt),
+    Empty(EmptyStmt),
+}
+
+#[derive(Debug, Clone)]
+pub struct EmptyStmt {
+    pub id: NodeId,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone)]
@@ -309,7 +316,7 @@ pub struct NewExpr {
     pub id: NodeId,
     pub span: Span,
     pub callee: Box<Expression>,
-    pub args: Vec<Expression>,
+    pub args: Vec<CallArg>,
 }
 
 #[derive(Debug, Clone)]
@@ -346,7 +353,13 @@ pub enum ArrowBody {
 pub struct ObjectLiteralExpr {
     pub id: NodeId,
     pub span: Span,
-    pub properties: Vec<ObjectProperty>,
+    pub properties: Vec<ObjectPropertyOrSpread>,
+}
+
+#[derive(Debug, Clone)]
+pub enum ObjectPropertyOrSpread {
+    Property(ObjectProperty),
+    Spread(Expression),
 }
 
 #[derive(Debug, Clone)]
@@ -362,10 +375,17 @@ pub enum ObjectPropertyKey {
 }
 
 #[derive(Debug, Clone)]
+pub enum ArrayElement {
+    Expr(Expression),
+    Hole,
+    Spread(Expression),
+}
+
+#[derive(Debug, Clone)]
 pub struct ArrayLiteralExpr {
     pub id: NodeId,
     pub span: Span,
-    pub elements: Vec<Option<Expression>>,
+    pub elements: Vec<ArrayElement>,
 }
 
 #[derive(Debug, Clone)]
@@ -402,6 +422,7 @@ pub enum LiteralValue {
     False,
     Number(f64),
     Int(i64),
+    BigInt(String),
     String(String),
     RegExp { pattern: String, flags: String },
 }
@@ -470,11 +491,17 @@ pub enum UnaryOp {
 }
 
 #[derive(Debug, Clone)]
+pub enum CallArg {
+    Expr(Expression),
+    Spread(Expression),
+}
+
+#[derive(Debug, Clone)]
 pub struct CallExpr {
     pub id: NodeId,
     pub span: Span,
     pub callee: Box<Expression>,
-    pub args: Vec<Expression>,
+    pub args: Vec<CallArg>,
 }
 
 #[derive(Debug, Clone)]
@@ -522,6 +549,7 @@ impl Statement {
             Statement::Switch(s) => s.span,
             Statement::ForIn(s) => s.span,
             Statement::ForOf(s) => s.span,
+            Statement::Empty(s) => s.span,
         }
     }
 }

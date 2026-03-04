@@ -11,6 +11,7 @@ mod encode;
 mod error;
 mod eval;
 mod function_ctor;
+mod function_proto;
 mod host;
 mod json;
 mod map;
@@ -37,6 +38,12 @@ pub struct BuiltinContext<'a> {
 #[derive(Debug)]
 pub enum BuiltinError {
     Throw(Value),
+    Invoke {
+        callee: Value,
+        this_arg: Value,
+        args: Vec<Value>,
+        new_object: Option<usize>,
+    },
 }
 
 pub(crate) fn to_number(v: &Value) -> f64 {
@@ -54,6 +61,7 @@ pub(crate) fn to_number(v: &Value) -> f64 {
         Value::Undefined => f64::NAN,
         Value::String(s) => s.parse().unwrap_or_else(|_| f64::NAN),
         Value::Symbol(_)
+        | Value::BigInt(_)
         | Value::Object(_)
         | Value::Array(_)
         | Value::Map(_)
@@ -61,7 +69,9 @@ pub(crate) fn to_number(v: &Value) -> f64 {
         | Value::Date(_)
         | Value::Function(_)
         | Value::DynamicFunction(_)
-        | Value::Builtin(_) => f64::NAN,
+        | Value::Builtin(_)
+        | Value::BoundBuiltin(_, _, _)
+        | Value::BoundFunction(_, _, _) => f64::NAN,
     }
 }
 
@@ -73,6 +83,7 @@ pub(crate) fn is_truthy(v: &Value) -> bool {
         Value::Number(n) => *n != 0.0 && !n.is_nan(),
         Value::String(_)
         | Value::Symbol(_)
+        | Value::BigInt(_)
         | Value::Object(_)
         | Value::Array(_)
         | Value::Map(_)
@@ -80,7 +91,9 @@ pub(crate) fn is_truthy(v: &Value) -> bool {
         | Value::Date(_)
         | Value::Function(_)
         | Value::DynamicFunction(_)
-        | Value::Builtin(_) => true,
+        | Value::Builtin(_)
+        | Value::BoundBuiltin(_, _, _)
+        | Value::BoundFunction(_, _, _) => true,
     }
 }
 
@@ -89,6 +102,7 @@ pub(crate) fn to_prop_key(v: &Value) -> String {
         Value::String(s) => s.clone(),
         Value::Int(n) => n.to_string(),
         Value::Number(n) => n.to_string(),
+        Value::BigInt(s) => s.clone(),
         Value::Bool(b) => b.to_string(),
         Value::Null => "null".to_string(),
         Value::Undefined => "undefined".to_string(),
@@ -96,9 +110,19 @@ pub(crate) fn to_prop_key(v: &Value) -> String {
         Value::Object(_) | Value::Array(_) | Value::Map(_) | Value::Set(_) | Value::Date(_) => {
             "[object Object]".to_string()
         }
-        Value::Function(_) | Value::DynamicFunction(_) | Value::Builtin(_) => {
-            "function".to_string()
-        }
+        Value::Function(_) | Value::DynamicFunction(_) | Value::Builtin(_)
+        | Value::BoundBuiltin(_, _, _)
+        | Value::BoundFunction(_, _, _) => "function".to_string(),
+    }
+}
+
+pub(crate) fn to_prop_key_with_heap(v: &Value, heap: &crate::runtime::Heap) -> String {
+    match v {
+        Value::Symbol(id) => heap
+            .symbol_description(*id)
+            .map(|d| d.to_string())
+            .unwrap_or_else(|| format!("Symbol.{}", id)),
+        _ => to_prop_key(v),
     }
 }
 
@@ -112,6 +136,7 @@ pub(crate) fn strict_eq(a: &Value, b: &Value) -> bool {
         (Value::Number(x), Value::Int(y)) => !x.is_nan() && *x == (*y as f64),
         (Value::Number(x), Value::Number(y)) => !x.is_nan() && !y.is_nan() && x == y,
         (Value::String(x), Value::String(y)) => x == y,
+        (Value::BigInt(x), Value::BigInt(y)) => x == y,
         (Value::Symbol(x), Value::Symbol(y)) => x == y,
         (Value::Object(x), Value::Object(y)) => x == y,
         (Value::Array(x), Value::Array(y)) => x == y,
@@ -121,6 +146,13 @@ pub(crate) fn strict_eq(a: &Value, b: &Value) -> bool {
         (Value::Function(x), Value::Function(y)) => x == y,
         (Value::DynamicFunction(x), Value::DynamicFunction(y)) => x == y,
         (Value::Builtin(x), Value::Builtin(y)) => x == y,
+        (Value::BoundBuiltin(a, b, e), Value::BoundBuiltin(c, d, f)) => a == c && b == d && e == f,
+        (Value::BoundFunction(a1, b1, c1), Value::BoundFunction(a2, b2, c2)) => {
+            c1.len() == c2.len()
+                && strict_eq(a1, a2)
+                && strict_eq(b1, b2)
+                && c1.iter().zip(c2.iter()).all(|(x, y)| strict_eq(x, y))
+        }
         _ => false,
     }
 }
@@ -264,6 +296,11 @@ const BUILTINS: &[BuiltinDef] = &[
     },
     BuiltinDef {
         category: "Array",
+        name: "at",
+        entry: BuiltinEntry::Normal(array::at),
+    },
+    BuiltinDef {
+        category: "Array",
         name: "fill",
         entry: BuiltinEntry::Normal(array::fill),
     },
@@ -342,6 +379,71 @@ const BUILTINS: &[BuiltinDef] = &[
         name: "entries",
         entry: BuiltinEntry::Normal(array::entries),
     },
+    BuiltinDef {
+        category: "Array",
+        name: "find",
+        entry: BuiltinEntry::Normal(array::find),
+    },
+    BuiltinDef {
+        category: "Array",
+        name: "findIndex",
+        entry: BuiltinEntry::Normal(array::find_index),
+    },
+    BuiltinDef {
+        category: "Array",
+        name: "findLast",
+        entry: BuiltinEntry::Normal(array::find_last),
+    },
+    BuiltinDef {
+        category: "Array",
+        name: "findLastIndex",
+        entry: BuiltinEntry::Normal(array::find_last_index),
+    },
+    BuiltinDef {
+        category: "Array",
+        name: "flat",
+        entry: BuiltinEntry::Normal(array::flat),
+    },
+    BuiltinDef {
+        category: "Array",
+        name: "flatMap",
+        entry: BuiltinEntry::Normal(array::flat_map),
+    },
+    BuiltinDef {
+        category: "Array",
+        name: "copyWithin",
+        entry: BuiltinEntry::Normal(array::copy_within),
+    },
+    BuiltinDef {
+        category: "Array",
+        name: "toReversed",
+        entry: BuiltinEntry::Normal(array::to_reversed),
+    },
+    BuiltinDef {
+        category: "Array",
+        name: "toSorted",
+        entry: BuiltinEntry::Normal(array::to_sorted),
+    },
+    BuiltinDef {
+        category: "Array",
+        name: "toSpliced",
+        entry: BuiltinEntry::Normal(array::to_spliced),
+    },
+    BuiltinDef {
+        category: "Array",
+        name: "with",
+        entry: BuiltinEntry::Normal(array::array_with),
+    },
+    BuiltinDef {
+        category: "Array",
+        name: "from",
+        entry: BuiltinEntry::Normal(array::array_from),
+    },
+    BuiltinDef {
+        category: "Array",
+        name: "of",
+        entry: BuiltinEntry::Normal(array::array_of),
+    },
     // Math 0..8
     BuiltinDef {
         category: "Math",
@@ -387,6 +489,21 @@ const BUILTINS: &[BuiltinDef] = &[
         category: "Math",
         name: "random",
         entry: BuiltinEntry::Normal(math::random),
+    },
+    BuiltinDef {
+        category: "Math",
+        name: "sign",
+        entry: BuiltinEntry::Normal(math::sign),
+    },
+    BuiltinDef {
+        category: "Math",
+        name: "trunc",
+        entry: BuiltinEntry::Normal(math::trunc),
+    },
+    BuiltinDef {
+        category: "Math",
+        name: "sumPrecise",
+        entry: BuiltinEntry::Normal(math::sum_precise),
     },
     // Json 0..1
     BuiltinDef {
@@ -475,6 +592,11 @@ const BUILTINS: &[BuiltinDef] = &[
         name: "is",
         entry: BuiltinEntry::Normal(object::is_same_value),
     },
+    BuiltinDef {
+        category: "Object",
+        name: "fromEntries",
+        entry: BuiltinEntry::Normal(object::from_entries),
+    },
     // Type 0..3 (String, Error, Number, Boolean constructors)
     BuiltinDef {
         category: "Type",
@@ -498,6 +620,11 @@ const BUILTINS: &[BuiltinDef] = &[
     },
     BuiltinDef {
         category: "Number",
+        name: "isInteger",
+        entry: BuiltinEntry::Normal(number::is_integer),
+    },
+    BuiltinDef {
+        category: "Number",
         name: "isSafeInteger",
         entry: BuiltinEntry::Normal(number::is_safe_integer),
     },
@@ -515,12 +642,37 @@ const BUILTINS: &[BuiltinDef] = &[
     BuiltinDef {
         category: "String",
         name: "split",
-        entry: BuiltinEntry::Normal(string::split),
+        entry: BuiltinEntry::Throwing(string::split_throwing),
+    },
+    BuiltinDef {
+        category: "String",
+        name: "match",
+        entry: BuiltinEntry::Throwing(string::match_throwing),
+    },
+    BuiltinDef {
+        category: "String",
+        name: "search",
+        entry: BuiltinEntry::Throwing(string::search_throwing),
+    },
+    BuiltinDef {
+        category: "String",
+        name: "replace",
+        entry: BuiltinEntry::Throwing(string::replace_throwing),
     },
     BuiltinDef {
         category: "String",
         name: "trim",
         entry: BuiltinEntry::Normal(string::trim),
+    },
+    BuiltinDef {
+        category: "String",
+        name: "startsWith",
+        entry: BuiltinEntry::Normal(string::starts_with),
+    },
+    BuiltinDef {
+        category: "String",
+        name: "endsWith",
+        entry: BuiltinEntry::Normal(string::ends_with),
     },
     BuiltinDef {
         category: "String",
@@ -536,6 +688,16 @@ const BUILTINS: &[BuiltinDef] = &[
         category: "String",
         name: "charAt",
         entry: BuiltinEntry::Normal(string::char_at),
+    },
+    BuiltinDef {
+        category: "String",
+        name: "charCodeAt",
+        entry: BuiltinEntry::Normal(string::char_code_at),
+    },
+    BuiltinDef {
+        category: "String",
+        name: "at",
+        entry: BuiltinEntry::Normal(string::at),
     },
     BuiltinDef {
         category: "String",
@@ -611,6 +773,11 @@ const BUILTINS: &[BuiltinDef] = &[
     },
     BuiltinDef {
         category: "RegExp",
+        name: "exec",
+        entry: BuiltinEntry::Normal(regexp::exec),
+    },
+    BuiltinDef {
+        category: "RegExp",
         name: "test",
         entry: BuiltinEntry::Normal(regexp::test),
     },
@@ -618,6 +785,26 @@ const BUILTINS: &[BuiltinDef] = &[
         category: "RegExp",
         name: "compile",
         entry: BuiltinEntry::Normal(regexp::compile),
+    },
+    BuiltinDef {
+        category: "RegExp",
+        name: "symbol_match",
+        entry: BuiltinEntry::Normal(regexp::symbol_match),
+    },
+    BuiltinDef {
+        category: "RegExp",
+        name: "symbol_search",
+        entry: BuiltinEntry::Normal(regexp::symbol_search),
+    },
+    BuiltinDef {
+        category: "RegExp",
+        name: "symbol_replace",
+        entry: BuiltinEntry::Normal(regexp::symbol_replace),
+    },
+    BuiltinDef {
+        category: "RegExp",
+        name: "symbol_split",
+        entry: BuiltinEntry::Normal(regexp::symbol_split),
     },
     // Map 0..3
     BuiltinDef {
@@ -733,6 +920,11 @@ const BUILTINS: &[BuiltinDef] = &[
         category: "Date",
         name: "getYear",
         entry: BuiltinEntry::Normal(date::get_year),
+    },
+    BuiltinDef {
+        category: "Date",
+        name: "getFullYear",
+        entry: BuiltinEntry::Normal(date::get_full_year),
     },
     BuiltinDef {
         category: "Date",
@@ -866,6 +1058,11 @@ const BUILTINS: &[BuiltinDef] = &[
     },
     BuiltinDef {
         category: "Reflect",
+        name: "get",
+        entry: BuiltinEntry::Throwing(reflect::reflect_get),
+    },
+    BuiltinDef {
+        category: "Reflect",
         name: "apply",
         entry: BuiltinEntry::Throwing(reflect::reflect_apply),
     },
@@ -873,6 +1070,11 @@ const BUILTINS: &[BuiltinDef] = &[
         category: "Reflect",
         name: "construct",
         entry: BuiltinEntry::Throwing(reflect::reflect_construct),
+    },
+    BuiltinDef {
+        category: "Object",
+        name: "toString",
+        entry: BuiltinEntry::Normal(object::to_string),
     },
     BuiltinDef {
         category: "Object",
@@ -890,6 +1092,11 @@ const BUILTINS: &[BuiltinDef] = &[
         entry: BuiltinEntry::Normal(object::define_property),
     },
     BuiltinDef {
+        category: "Object",
+        name: "defineProperties",
+        entry: BuiltinEntry::Normal(object::define_properties),
+    },
+    BuiltinDef {
         category: "Host",
         name: "timeout",
         entry: BuiltinEntry::Throwing(timeout::timeout),
@@ -903,6 +1110,21 @@ const BUILTINS: &[BuiltinDef] = &[
         category: "Global",
         name: "unescape",
         entry: BuiltinEntry::Normal(encode::unescape_builtin),
+    },
+    BuiltinDef {
+        category: "Function",
+        name: "call",
+        entry: BuiltinEntry::Throwing(function_proto::function_call),
+    },
+    BuiltinDef {
+        category: "Function",
+        name: "apply",
+        entry: BuiltinEntry::Throwing(function_proto::function_apply),
+    },
+    BuiltinDef {
+        category: "Function",
+        name: "bind",
+        entry: BuiltinEntry::Throwing(function_proto::function_bind),
     },
 ];
 
@@ -922,6 +1144,22 @@ pub fn name(id: u8) -> &'static str {
         .and_then(|i| BUILTINS.get(i))
         .map(|b| b.name)
         .unwrap_or("?")
+}
+
+pub fn length(id: u8) -> i32 {
+    get(id)
+        .map(|b| match (b.category, b.name) {
+            ("String", "anchor") | ("String", "fontcolor") | ("String", "fontsize")
+            | ("String", "link") | ("String", "match") | ("String", "search") => 1,
+            ("String", "replace") => 2,
+            ("String", "substr") => 2,
+            ("Date", "setYear") => 1,
+            ("Array", "includes") | ("Array", "indexOf") | ("Array", "lastIndexOf") => 1,
+            ("RegExp", "compile") => 2,
+            ("Global", "escape") | ("Global", "unescape") => 1,
+            _ => 0,
+        })
+        .unwrap_or(0)
 }
 
 pub fn category(id: u8) -> &'static str {
@@ -947,7 +1185,8 @@ pub fn by_category(cat: &str) -> impl Iterator<Item = (u8, &'static BuiltinDef)>
         .filter_map(|(i, b)| (i <= u8::MAX as usize).then(|| (i as u8, b)))
 }
 
-/// Resolve (category, name) to builtin index. Index is 0..BUILTINS.len()-1.
+pub const ARRAY_PUSH_BUILTIN_ID: u8 = 1;
+
 pub fn resolve(category: &str, name: &str) -> Option<u8> {
     BUILTINS
         .iter()
@@ -994,13 +1233,16 @@ mod tests {
     fn resolve_known_builtins() {
         assert_eq!(resolve("Host", "print"), Some(0));
         assert_eq!(resolve("Array", "push"), Some(1));
-        assert_eq!(resolve("Math", "floor"), Some(28));
-        assert_eq!(resolve("Json", "parse"), Some(37));
-        assert_eq!(resolve("Object", "preventExtensions"), Some(43));
-        assert_eq!(resolve("Object", "setPrototypeOf"), Some(45));
-        assert_eq!(resolve("String", "fromCharCode"), Some(67));
-        assert_eq!(resolve("Date", "now"), Some(99));
-        assert_eq!(resolve("Global", "Function"), Some(126));
+        assert!(resolve("Math", "floor").is_some());
+        assert!(resolve("Json", "parse").is_some());
+        assert!(resolve("Object", "preventExtensions").is_some());
+        assert!(resolve("Object", "setPrototypeOf").is_some());
+        assert!(resolve("String", "fromCharCode").is_some());
+        assert!(resolve("String", "match").is_some());
+        assert!(resolve("String", "search").is_some());
+        assert!(resolve("String", "replace").is_some());
+        assert!(resolve("Date", "now").is_some());
+        assert!(resolve("Global", "Function").is_some());
         assert_eq!(resolve("Unknown", "foo"), None);
     }
 
@@ -1008,5 +1250,19 @@ mod tests {
     fn function_builtin_resolve() {
         let id = resolve("Global", "Function").expect("Function");
         assert_eq!(name(id), "Function");
+    }
+
+    #[test]
+    fn strict_eq_bigint() {
+        use crate::runtime::Value;
+        assert!(strict_eq(&Value::BigInt("1".to_string()), &Value::BigInt("1".to_string())));
+        assert!(!strict_eq(
+            &Value::BigInt("1".to_string()),
+            &Value::BigInt("2".to_string())
+        ));
+        assert!(!strict_eq(
+            &Value::BigInt("1".to_string()),
+            &Value::Int(1)
+        ));
     }
 }

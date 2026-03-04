@@ -340,9 +340,12 @@ pub fn json_stringify(v: &Value, heap: &Heap) -> Option<String> {
     match v {
         Value::Undefined
         | Value::Symbol(_)
+        | Value::BigInt(_)
         | Value::Function(_)
         | Value::DynamicFunction(_)
-        | Value::Builtin(_) => None,
+        | Value::Builtin(_)
+        | Value::BoundBuiltin(_, _, _)
+        | Value::BoundFunction(_, _, _) => None,
         Value::Null => Some("null".to_string()),
         Value::Bool(b) => Some(if *b { "true" } else { "false" }.to_string()),
         Value::Int(n) => Some(n.to_string()),

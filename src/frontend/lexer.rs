@@ -259,6 +259,13 @@ impl Lexer<'_> {
             }
         }
 
+        if matches!(self.current_char, Some('n') | Some('N')) {
+            raw_for_span.push(self.current_char.unwrap());
+            self.advance();
+            let span = Span::from_text(start_pos, &raw_for_span);
+            return Token::new(TokenType::BigInt, lexeme, span);
+        }
+
         if self.current_char == Some('.') {
             lexeme.push('.');
             raw_for_span.push('.');

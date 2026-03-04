@@ -83,6 +83,12 @@ const GLOBAL_NAMES: &[&str] = &[
     "__hasOwnProperty",
     "__propertyIsEnumerable",
     "nonIndexNumericPropertyName",
+    "verifyProperty",
+    "verifyCallableProperty",
+    "isConfigurable",
+    "isEnumerable",
+    "isSameValue",
+    "isWritable",
 ];
 
 #[derive(Debug)]
@@ -187,6 +193,7 @@ fn collect_function_exprs_stmt(stmt: &Statement, out: &mut Vec<(NodeId, Function
         }
         Statement::Throw(t) => collect_function_exprs_expr(&t.argument, out),
         Statement::Expression(e) => collect_function_exprs_expr(&e.expression, out),
+        Statement::Empty(_) => {}
         Statement::VarDecl(v) => {
             for d in &v.declarations {
                 collect_function_exprs_binding(&d.binding, out);
@@ -236,7 +243,10 @@ fn collect_function_exprs_expr(expr: &Expression, out: &mut Vec<(NodeId, Functio
         Expression::Call(e) => {
             collect_function_exprs_expr(&e.callee, out);
             for a in &e.args {
-                collect_function_exprs_expr(a, out);
+                match a {
+                    CallArg::Expr(expr) => collect_function_exprs_expr(expr, out),
+                    CallArg::Spread(expr) => collect_function_exprs_expr(expr, out),
+                }
             }
         }
         Expression::Member(m) => {
@@ -263,7 +273,10 @@ fn collect_function_exprs_expr(expr: &Expression, out: &mut Vec<(NodeId, Functio
         Expression::New(n) => {
             collect_function_exprs_expr(&n.callee, out);
             for a in &n.args {
-                collect_function_exprs_expr(a, out);
+                match a {
+                    CallArg::Expr(expr) => collect_function_exprs_expr(expr, out),
+                    CallArg::Spread(expr) => collect_function_exprs_expr(expr, out),
+                }
             }
         }
         Expression::Conditional(c) => {
@@ -273,16 +286,25 @@ fn collect_function_exprs_expr(expr: &Expression, out: &mut Vec<(NodeId, Functio
         }
         Expression::ObjectLiteral(o) => {
             for prop in &o.properties {
-                if let ObjectPropertyKey::Computed(key_expr) = &prop.key {
-                    collect_function_exprs_expr(key_expr, out);
+                match prop {
+                    ObjectPropertyOrSpread::Property(p) => {
+                        if let ObjectPropertyKey::Computed(key_expr) = &p.key {
+                            collect_function_exprs_expr(key_expr, out);
+                        }
+                        collect_function_exprs_expr(&p.value, out);
+                    }
+                    ObjectPropertyOrSpread::Spread(expr) => {
+                        collect_function_exprs_expr(expr, out);
+                    }
                 }
-                collect_function_exprs_expr(&prop.value, out);
             }
         }
         Expression::ArrayLiteral(a) => {
             for e in &a.elements {
-                if let Some(expr) = e {
-                    collect_function_exprs_expr(expr, out);
+                match e {
+                    ArrayElement::Expr(expr) => collect_function_exprs_expr(expr, out),
+                    ArrayElement::Spread(expr) => collect_function_exprs_expr(expr, out),
+                    ArrayElement::Hole => {}
                 }
             }
         }
@@ -337,7 +359,8 @@ pub fn script_to_hir(script: &Script) -> Result<Vec<HirFunction>, LowerError> {
                 func_index.insert(f.name.clone(), idx);
                 func_decls.push(f);
             }
-            Statement::Expression(_)
+            Statement::Empty(_)
+            | Statement::Expression(_)
             | Statement::VarDecl(_)
             | Statement::LetDecl(_)
             | Statement::ConstDecl(_)
@@ -1374,6 +1397,7 @@ fn compile_statement(stmt: &Statement, ctx: &mut LowerCtx<'_>) -> Result<bool, L
                 .push(HirOp::Pop { span: e.span });
             return Ok(false);
         }
+        Statement::Empty(_) => return Ok(false),
         Statement::If(i) => {
             let cond_slot = ctx.next_slot;
             ctx.next_slot += 1;
@@ -2202,6 +2226,124 @@ fn compile_function_expr_to_hir(
     })
 }
 
+fn compile_call_arg(arg: &CallArg, ctx: &mut LowerCtx<'_>, span: Span) -> Result<(), LowerError> {
+    match arg {
+        CallArg::Expr(expr) => compile_expression(expr, ctx),
+        CallArg::Spread(expr) => {
+            compile_expression(expr, ctx)?;
+            Ok(())
+        }
+    }
+}
+
+fn args_has_spread(args: &[CallArg]) -> bool {
+    args.iter().any(|a| matches!(a, CallArg::Spread(_)))
+}
+
+fn compile_new_with_spread(
+    callee: &Expression,
+    args: &[CallArg],
+    ctx: &mut LowerCtx<'_>,
+    span: Span,
+) -> Result<(), LowerError> {
+    ctx.blocks[ctx.current_block].ops.push(HirOp::NewArray { span });
+    ctx.blocks[ctx.current_block].ops.push(HirOp::Dup { span });
+    ctx.blocks[ctx.current_block].ops.push(HirOp::GetProp {
+        key: "concat".to_string(),
+        span,
+    });
+    for arg in args {
+        match arg {
+            CallArg::Expr(expr) => compile_expression(expr, ctx)?,
+            CallArg::Spread(expr) => compile_expression(expr, ctx)?,
+        }
+    }
+    let argc = args.len() as u32;
+    ctx.blocks[ctx.current_block].ops.push(HirOp::CallMethod { argc, span });
+    let args_array_slot = ctx.next_slot;
+    ctx.next_slot += 1;
+    ctx.blocks[ctx.current_block].ops.push(HirOp::StoreLocal {
+        id: args_array_slot,
+        span,
+    });
+    ctx.blocks[ctx.current_block].ops.push(HirOp::LoadConst {
+        value: HirConst::Global("Reflect".to_string()),
+        span,
+    });
+    ctx.blocks[ctx.current_block].ops.push(HirOp::Dup { span });
+    ctx.blocks[ctx.current_block].ops.push(HirOp::GetProp {
+        key: "construct".to_string(),
+        span,
+    });
+    compile_expression(callee, ctx)?;
+    ctx.blocks[ctx.current_block].ops.push(HirOp::LoadLocal {
+        id: args_array_slot,
+        span,
+    });
+    ctx.blocks[ctx.current_block].ops.push(HirOp::CallMethod { argc: 2, span });
+    Ok(())
+}
+
+fn compile_call_with_spread(
+    callee: &Expression,
+    this_arg: Option<&Expression>,
+    args: &[CallArg],
+    ctx: &mut LowerCtx<'_>,
+    span: Span,
+) -> Result<(), LowerError> {
+    let callee_slot = ctx.next_slot;
+    ctx.next_slot += 1;
+    compile_expression(callee, ctx)?;
+    ctx.blocks[ctx.current_block].ops.push(HirOp::StoreLocal {
+        id: callee_slot,
+        span,
+    });
+    ctx.blocks[ctx.current_block].ops.push(HirOp::NewArray { span });
+    ctx.blocks[ctx.current_block].ops.push(HirOp::Dup { span });
+    ctx.blocks[ctx.current_block].ops.push(HirOp::GetProp {
+        key: "concat".to_string(),
+        span,
+    });
+    for arg in args {
+        match arg {
+            CallArg::Expr(expr) => compile_expression(expr, ctx)?,
+            CallArg::Spread(expr) => compile_expression(expr, ctx)?,
+        }
+    }
+    let argc = args.len() as u32;
+    ctx.blocks[ctx.current_block].ops.push(HirOp::CallMethod { argc, span });
+    let args_array_slot = ctx.next_slot;
+    ctx.next_slot += 1;
+    ctx.blocks[ctx.current_block].ops.push(HirOp::StoreLocal {
+        id: args_array_slot,
+        span,
+    });
+    ctx.blocks[ctx.current_block].ops.push(HirOp::LoadConst {
+        value: HirConst::Global("Reflect".to_string()),
+        span,
+    });
+    ctx.blocks[ctx.current_block].ops.push(HirOp::Dup { span });
+    ctx.blocks[ctx.current_block].ops.push(HirOp::GetProp {
+        key: "apply".to_string(),
+        span,
+    });
+    ctx.blocks[ctx.current_block].ops.push(HirOp::LoadLocal { id: callee_slot, span });
+    if let Some(this_expr) = this_arg {
+        compile_expression(this_expr, ctx)?;
+    } else {
+        ctx.blocks[ctx.current_block].ops.push(HirOp::LoadConst {
+            value: HirConst::Undefined,
+            span,
+        });
+    }
+    ctx.blocks[ctx.current_block].ops.push(HirOp::LoadLocal {
+        id: args_array_slot,
+        span,
+    });
+    ctx.blocks[ctx.current_block].ops.push(HirOp::CallMethod { argc: 3, span });
+    Ok(())
+}
+
 fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), LowerError> {
     let func_index = get_func_index(ctx);
     match expr {
@@ -2225,6 +2367,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                 let value = match &e.value {
                     LiteralValue::Int(n) => HirConst::Int(*n),
                     LiteralValue::Number(n) => HirConst::Float(*n),
+                    LiteralValue::BigInt(s) => HirConst::BigInt(s.clone()),
                     LiteralValue::True => HirConst::Int(1),
                     LiteralValue::False => HirConst::Int(0),
                     LiteralValue::Null => HirConst::Null,
@@ -2793,6 +2936,51 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
         },
         Expression::Call(e) => match e.callee.as_ref() {
             Expression::Member(m) => {
+                if let MemberProperty::Expression(key_expr) = &m.property {
+                    let only_spread =
+                        e.args.len() == 1 && matches!(&e.args[0], CallArg::Spread(_));
+                    let has_spread = args_has_spread(&e.args);
+                    if has_spread && !only_spread {
+                        compile_call_with_spread(
+                            e.callee.as_ref(),
+                            Some(&m.object),
+                            &e.args,
+                            ctx,
+                            e.span,
+                        )?;
+                    } else {
+                        compile_expression(&m.object, ctx)?;
+                        ctx.blocks[ctx.current_block].ops.push(HirOp::Dup { span: e.span });
+                        compile_expression(key_expr, ctx)?;
+                        ctx.blocks[ctx.current_block]
+                            .ops
+                            .push(HirOp::GetPropDyn { span: e.span });
+                        if only_spread {
+                            if let CallArg::Spread(spread_expr) = &e.args[0] {
+                                ctx.blocks[ctx.current_block].ops.push(HirOp::Swap { span: e.span });
+                                ctx.blocks[ctx.current_block].ops.push(HirOp::Dup { span: e.span });
+                                ctx.blocks[ctx.current_block].ops.push(HirOp::GetProp {
+                                    key: "apply".to_string(),
+                                    span: e.span,
+                                });
+                                ctx.blocks[ctx.current_block].ops.push(HirOp::Swap { span: e.span });
+                                compile_expression(spread_expr, ctx)?;
+                                ctx.blocks[ctx.current_block].ops.push(HirOp::CallMethod {
+                                    argc: 2,
+                                    span: e.span,
+                                });
+                            }
+                        } else {
+                            for arg in &e.args {
+                                compile_call_arg(arg, ctx, e.span)?;
+                            }
+                            ctx.blocks[ctx.current_block].ops.push(HirOp::CallMethod {
+                                argc: e.args.len() as u32,
+                                span: e.span,
+                            });
+                        }
+                    }
+                } else {
                 let (obj_name, prop) = match (&m.object.as_ref(), &m.property) {
                     (Expression::Identifier(obj), MemberProperty::Identifier(p)) => {
                         (Some(&obj.name), p.as_str())
@@ -2800,9 +2988,17 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                     (_, MemberProperty::Identifier(p)) => (None, p.as_str()),
                     _ => (None, ""),
                 };
-                if matches!(obj_name.as_deref(), Some(s) if s == "console") && prop == "log" {
+                if args_has_spread(&e.args) {
+                    compile_call_with_spread(
+                        e.callee.as_ref(),
+                        Some(&m.object),
+                        &e.args,
+                        ctx,
+                        e.span,
+                    )?;
+                } else if matches!(obj_name.as_deref(), Some(s) if s == "console") && prop == "log" {
                     for arg in &e.args {
-                        compile_expression(arg, ctx)?;
+                        compile_call_arg(arg, ctx, e.span)?;
                     }
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
                         builtin: b("Host", "print"),
@@ -2813,7 +3009,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                     && prop == "floor"
                     && e.args.len() == 1
                 {
-                    compile_expression(&e.args[0], ctx)?;
+                    compile_call_arg(&e.args[0], ctx, e.span)?;
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
                         builtin: b("Math", "floor"),
                         argc: 1,
@@ -2823,7 +3019,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                     && prop == "abs"
                     && e.args.len() == 1
                 {
-                    compile_expression(&e.args[0], ctx)?;
+                    compile_call_arg(&e.args[0], ctx, e.span)?;
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
                         builtin: b("Math", "abs"),
                         argc: 1,
@@ -2831,7 +3027,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                     });
                 } else if matches!(obj_name.as_deref(), Some(s) if s == "Math") && prop == "min" {
                     for arg in &e.args {
-                        compile_expression(arg, ctx)?;
+                        compile_call_arg(arg, ctx, e.span)?;
                     }
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
                         builtin: b("Math", "min"),
@@ -2840,7 +3036,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                     });
                 } else if matches!(obj_name.as_deref(), Some(s) if s == "Math") && prop == "max" {
                     for arg in &e.args {
-                        compile_expression(arg, ctx)?;
+                        compile_call_arg(arg, ctx, e.span)?;
                     }
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
                         builtin: b("Math", "max"),
@@ -2851,8 +3047,8 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                     && prop == "pow"
                     && e.args.len() == 2
                 {
-                    compile_expression(&e.args[0], ctx)?;
-                    compile_expression(&e.args[1], ctx)?;
+                    compile_call_arg(&e.args[0], ctx, e.span)?;
+                    compile_call_arg(&e.args[1], ctx, e.span)?;
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
                         builtin: b("Math", "pow"),
                         argc: 2,
@@ -2862,7 +3058,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                     && prop == "ceil"
                     && e.args.len() == 1
                 {
-                    compile_expression(&e.args[0], ctx)?;
+                    compile_call_arg(&e.args[0], ctx, e.span)?;
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
                         builtin: b("Math", "ceil"),
                         argc: 1,
@@ -2872,7 +3068,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                     && prop == "round"
                     && e.args.len() == 1
                 {
-                    compile_expression(&e.args[0], ctx)?;
+                    compile_call_arg(&e.args[0], ctx, e.span)?;
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
                         builtin: b("Math", "round"),
                         argc: 1,
@@ -2882,10 +3078,41 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                     && prop == "sqrt"
                     && e.args.len() == 1
                 {
-                    compile_expression(&e.args[0], ctx)?;
+                    compile_call_arg(&e.args[0], ctx, e.span)?;
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
                         builtin: b("Math", "sqrt"),
                         argc: 1,
+                        span: e.span,
+                    });
+                } else if matches!(obj_name.as_deref(), Some(s) if s == "Math")
+                    && prop == "sign"
+                    && e.args.len() == 1
+                {
+                    compile_call_arg(&e.args[0], ctx, e.span)?;
+                    ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
+                        builtin: b("Math", "sign"),
+                        argc: 1,
+                        span: e.span,
+                    });
+                } else if matches!(obj_name.as_deref(), Some(s) if s == "Math")
+                    && prop == "trunc"
+                    && e.args.len() == 1
+                {
+                    compile_call_arg(&e.args[0], ctx, e.span)?;
+                    ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
+                        builtin: b("Math", "trunc"),
+                        argc: 1,
+                        span: e.span,
+                    });
+                } else if matches!(obj_name.as_deref(), Some(s) if s == "Math")
+                    && prop == "sumPrecise"
+                {
+                    for arg in &e.args {
+                        compile_call_arg(arg, ctx, e.span)?;
+                    }
+                    ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
+                        builtin: b("Math", "sumPrecise"),
+                        argc: e.args.len() as u32,
                         span: e.span,
                     });
                 } else if matches!(obj_name.as_deref(), Some(s) if s == "Math")
@@ -2901,7 +3128,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                     && prop == "parse"
                     && e.args.len() == 1
                 {
-                    compile_expression(&e.args[0], ctx)?;
+                    compile_call_arg(&e.args[0], ctx, e.span)?;
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
                         builtin: b("Json", "parse"),
                         argc: 1,
@@ -2911,7 +3138,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                     && prop == "stringify"
                     && e.args.len() == 1
                 {
-                    compile_expression(&e.args[0], ctx)?;
+                    compile_call_arg(&e.args[0], ctx, e.span)?;
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
                         builtin: b("Json", "stringify"),
                         argc: 1,
@@ -2921,7 +3148,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                     && prop == "create"
                     && e.args.len() == 1
                 {
-                    compile_expression(&e.args[0], ctx)?;
+                    compile_call_arg(&e.args[0], ctx, e.span)?;
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
                         builtin: b("Object", "create"),
                         argc: 1,
@@ -2931,7 +3158,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                     && prop == "keys"
                     && e.args.len() == 1
                 {
-                    compile_expression(&e.args[0], ctx)?;
+                    compile_call_arg(&e.args[0], ctx, e.span)?;
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
                         builtin: b("Object", "keys"),
                         argc: 1,
@@ -2942,7 +3169,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                     && e.args.len() >= 1
                 {
                     for arg in &e.args {
-                        compile_expression(arg, ctx)?;
+                        compile_call_arg(arg, ctx, e.span)?;
                     }
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
                         builtin: b("Object", "assign"),
@@ -2953,7 +3180,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                     && prop == "preventExtensions"
                     && e.args.len() == 1
                 {
-                    compile_expression(&e.args[0], ctx)?;
+                    compile_call_arg(&e.args[0], ctx, e.span)?;
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
                         builtin: b("Object", "preventExtensions"),
                         argc: 1,
@@ -2963,7 +3190,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                     && prop == "seal"
                     && e.args.len() == 1
                 {
-                    compile_expression(&e.args[0], ctx)?;
+                    compile_call_arg(&e.args[0], ctx, e.span)?;
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
                         builtin: b("Object", "seal"),
                         argc: 1,
@@ -2973,8 +3200,8 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                     && prop == "setPrototypeOf"
                     && e.args.len() == 2
                 {
-                    compile_expression(&e.args[0], ctx)?;
-                    compile_expression(&e.args[1], ctx)?;
+                    compile_call_arg(&e.args[0], ctx, e.span)?;
+                    compile_call_arg(&e.args[1], ctx, e.span)?;
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
                         builtin: b("Object", "setPrototypeOf"),
                         argc: 2,
@@ -2984,8 +3211,8 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                     && prop == "propertyIsEnumerable"
                     && e.args.len() == 2
                 {
-                    compile_expression(&e.args[0], ctx)?;
-                    compile_expression(&e.args[1], ctx)?;
+                    compile_call_arg(&e.args[0], ctx, e.span)?;
+                    compile_call_arg(&e.args[1], ctx, e.span)?;
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
                         builtin: b("Object", "propertyIsEnumerable"),
                         argc: 2,
@@ -2995,7 +3222,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                     && prop == "getPrototypeOf"
                     && e.args.len() == 1
                 {
-                    compile_expression(&e.args[0], ctx)?;
+                    compile_call_arg(&e.args[0], ctx, e.span)?;
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
                         builtin: b("Object", "getPrototypeOf"),
                         argc: 1,
@@ -3005,7 +3232,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                     && prop == "freeze"
                     && e.args.len() == 1
                 {
-                    compile_expression(&e.args[0], ctx)?;
+                    compile_call_arg(&e.args[0], ctx, e.span)?;
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
                         builtin: b("Object", "freeze"),
                         argc: 1,
@@ -3015,7 +3242,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                     && prop == "isExtensible"
                     && e.args.len() == 1
                 {
-                    compile_expression(&e.args[0], ctx)?;
+                    compile_call_arg(&e.args[0], ctx, e.span)?;
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
                         builtin: b("Object", "isExtensible"),
                         argc: 1,
@@ -3025,7 +3252,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                     && prop == "isFrozen"
                     && e.args.len() == 1
                 {
-                    compile_expression(&e.args[0], ctx)?;
+                    compile_call_arg(&e.args[0], ctx, e.span)?;
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
                         builtin: b("Object", "isFrozen"),
                         argc: 1,
@@ -3035,7 +3262,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                     && prop == "isSealed"
                     && e.args.len() == 1
                 {
-                    compile_expression(&e.args[0], ctx)?;
+                    compile_call_arg(&e.args[0], ctx, e.span)?;
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
                         builtin: b("Object", "isSealed"),
                         argc: 1,
@@ -3045,8 +3272,8 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                     && prop == "hasOwn"
                     && e.args.len() == 2
                 {
-                    compile_expression(&e.args[0], ctx)?;
-                    compile_expression(&e.args[1], ctx)?;
+                    compile_call_arg(&e.args[0], ctx, e.span)?;
+                    compile_call_arg(&e.args[1], ctx, e.span)?;
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
                         builtin: b("Object", "hasOwn"),
                         argc: 2,
@@ -3056,18 +3283,38 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                     && prop == "is"
                     && e.args.len() == 2
                 {
-                    compile_expression(&e.args[0], ctx)?;
-                    compile_expression(&e.args[1], ctx)?;
+                    compile_call_arg(&e.args[0], ctx, e.span)?;
+                    compile_call_arg(&e.args[1], ctx, e.span)?;
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
                         builtin: b("Object", "is"),
                         argc: 2,
+                        span: e.span,
+                    });
+                } else if matches!(obj_name.as_deref(), Some(s) if s == "Object")
+                    && prop == "fromEntries"
+                    && e.args.len() == 1
+                {
+                    compile_call_arg(&e.args[0], ctx, e.span)?;
+                    ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
+                        builtin: b("Object", "fromEntries"),
+                        argc: 1,
+                        span: e.span,
+                    });
+                } else if matches!(obj_name.as_deref(), Some(s) if s == "Number")
+                    && prop == "isInteger"
+                    && e.args.len() == 1
+                {
+                    compile_call_arg(&e.args[0], ctx, e.span)?;
+                    ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
+                        builtin: b("Number", "isInteger"),
+                        argc: 1,
                         span: e.span,
                     });
                 } else if matches!(obj_name.as_deref(), Some(s) if s == "Number")
                     && prop == "isSafeInteger"
                     && e.args.len() == 1
                 {
-                    compile_expression(&e.args[0], ctx)?;
+                    compile_call_arg(&e.args[0], ctx, e.span)?;
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
                         builtin: b("Number", "isSafeInteger"),
                         argc: 1,
@@ -3077,7 +3324,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                     && prop == "fromCharCode"
                 {
                     for arg in &e.args {
-                        compile_expression(arg, ctx)?;
+                        compile_call_arg(arg, ctx, e.span)?;
                     }
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
                         builtin: b("String", "fromCharCode"),
@@ -3088,7 +3335,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                     && prop == "isArray"
                     && e.args.len() == 1
                 {
-                    compile_expression(&e.args[0], ctx)?;
+                    compile_call_arg(&e.args[0], ctx, e.span)?;
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
                         builtin: b("Array", "isArray"),
                         argc: 1,
@@ -3098,7 +3345,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                     && prop == "isError"
                     && e.args.len() == 1
                 {
-                    compile_expression(&e.args[0], ctx)?;
+                    compile_call_arg(&e.args[0], ctx, e.span)?;
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
                         builtin: b("Error", "isError"),
                         argc: 1,
@@ -3117,7 +3364,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                     && prop == "escape"
                     && e.args.len() == 1
                 {
-                    compile_expression(&e.args[0], ctx)?;
+                    compile_call_arg(&e.args[0], ctx, e.span)?;
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
                         builtin: b("RegExp", "escape"),
                         argc: 1,
@@ -3126,7 +3373,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                 } else if prop == "push" {
                     compile_expression(&m.object, ctx)?;
                     for arg in &e.args {
-                        compile_expression(arg, ctx)?;
+                        compile_call_arg(arg, ctx, e.span)?;
                     }
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
                         builtin: b("Array", "push"),
@@ -3142,8 +3389,8 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                     });
                 } else if prop == "set" && e.args.len() == 2 {
                     compile_expression(&m.object, ctx)?;
-                    compile_expression(&e.args[0], ctx)?;
-                    compile_expression(&e.args[1], ctx)?;
+                    compile_call_arg(&e.args[0], ctx, e.span)?;
+                    compile_call_arg(&e.args[1], ctx, e.span)?;
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
                         builtin: b("Map", "set"),
                         argc: 3,
@@ -3151,7 +3398,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                     });
                 } else if prop == "get" && e.args.len() == 1 {
                     compile_expression(&m.object, ctx)?;
-                    compile_expression(&e.args[0], ctx)?;
+                    compile_call_arg(&e.args[0], ctx, e.span)?;
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
                         builtin: b("Map", "get"),
                         argc: 2,
@@ -3159,7 +3406,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                     });
                 } else if prop == "has" && e.args.len() == 1 {
                     compile_expression(&m.object, ctx)?;
-                    compile_expression(&e.args[0], ctx)?;
+                    compile_call_arg(&e.args[0], ctx, e.span)?;
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
                         builtin: b("Collection", "has"),
                         argc: 2,
@@ -3167,7 +3414,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                     });
                 } else if prop == "add" && e.args.len() == 1 {
                     compile_expression(&m.object, ctx)?;
-                    compile_expression(&e.args[0], ctx)?;
+                    compile_call_arg(&e.args[0], ctx, e.span)?;
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
                         builtin: b("Set", "add"),
                         argc: 2,
@@ -3199,7 +3446,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                     let start = e.args.get(0);
                     let end = e.args.get(1);
                     if let Some(s) = start {
-                        compile_expression(s, ctx)?;
+                        compile_call_arg(s, ctx, e.span)?;
                     } else {
                         ctx.blocks[ctx.current_block].ops.push(HirOp::LoadConst {
                             value: HirConst::Int(0),
@@ -3207,7 +3454,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                         });
                     }
                     if let Some(ed) = end {
-                        compile_expression(ed, ctx)?;
+                        compile_call_arg(ed, ctx, e.span)?;
                     } else {
                         ctx.blocks[ctx.current_block].ops.push(HirOp::LoadConst {
                             value: HirConst::Undefined,
@@ -3222,7 +3469,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                 } else if prop == "concat" {
                     compile_expression(&m.object, ctx)?;
                     for arg in &e.args {
-                        compile_expression(arg, ctx)?;
+                        compile_call_arg(arg, ctx, e.span)?;
                     }
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
                         builtin: b("Array", "concat"),
@@ -3234,7 +3481,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                     let search = e.args.first();
                     let from = e.args.get(1);
                     if let Some(s) = search {
-                        compile_expression(s, ctx)?;
+                        compile_call_arg(s, ctx, e.span)?;
                     } else {
                         ctx.blocks[ctx.current_block].ops.push(HirOp::LoadConst {
                             value: HirConst::Undefined,
@@ -3242,7 +3489,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                         });
                     }
                     if let Some(f) = from {
-                        compile_expression(f, ctx)?;
+                        compile_call_arg(f, ctx, e.span)?;
                     } else {
                         ctx.blocks[ctx.current_block].ops.push(HirOp::LoadConst {
                             value: HirConst::Int(0),
@@ -3259,7 +3506,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                     let search = e.args.first();
                     let from = e.args.get(1);
                     if let Some(s) = search {
-                        compile_expression(s, ctx)?;
+                        compile_call_arg(s, ctx, e.span)?;
                     } else {
                         ctx.blocks[ctx.current_block].ops.push(HirOp::LoadConst {
                             value: HirConst::Undefined,
@@ -3267,7 +3514,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                         });
                     }
                     if let Some(f) = from {
-                        compile_expression(f, ctx)?;
+                        compile_call_arg(f, ctx, e.span)?;
                     } else {
                         ctx.blocks[ctx.current_block].ops.push(HirOp::LoadConst {
                             value: HirConst::Int(0),
@@ -3283,7 +3530,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                     compile_expression(&m.object, ctx)?;
                     let sep = e.args.first();
                     if let Some(s) = sep {
-                        compile_expression(s, ctx)?;
+                        compile_call_arg(s, ctx, e.span)?;
                     } else {
                         ctx.blocks[ctx.current_block].ops.push(HirOp::LoadConst {
                             value: HirConst::String(",".to_string()),
@@ -3305,7 +3552,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                 } else if prop == "unshift" {
                     compile_expression(&m.object, ctx)?;
                     for arg in &e.args {
-                        compile_expression(arg, ctx)?;
+                        compile_call_arg(arg, ctx, e.span)?;
                     }
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
                         builtin: b("Array", "unshift"),
@@ -3323,7 +3570,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                     compile_expression(&m.object, ctx)?;
                     let value = e.args.first();
                     if let Some(v) = value {
-                        compile_expression(v, ctx)?;
+                        compile_call_arg(v, ctx, e.span)?;
                     } else {
                         ctx.blocks[ctx.current_block].ops.push(HirOp::LoadConst {
                             value: HirConst::Undefined,
@@ -3332,7 +3579,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                     }
                     let start = e.args.get(1);
                     if let Some(s) = start {
-                        compile_expression(s, ctx)?;
+                        compile_call_arg(s, ctx, e.span)?;
                     } else {
                         ctx.blocks[ctx.current_block].ops.push(HirOp::LoadConst {
                             value: HirConst::Undefined,
@@ -3341,7 +3588,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                     }
                     let end = e.args.get(2);
                     if let Some(ed) = end {
-                        compile_expression(ed, ctx)?;
+                        compile_call_arg(ed, ctx, e.span)?;
                     } else {
                         ctx.blocks[ctx.current_block].ops.push(HirOp::LoadConst {
                             value: HirConst::Undefined,
@@ -3357,7 +3604,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                     compile_expression(&m.object, ctx)?;
                     let sep = e.args.first();
                     if let Some(s) = sep {
-                        compile_expression(s, ctx)?;
+                        compile_call_arg(s, ctx, e.span)?;
                     } else {
                         ctx.blocks[ctx.current_block].ops.push(HirOp::LoadConst {
                             value: HirConst::Undefined,
@@ -3394,7 +3641,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                     compile_expression(&m.object, ctx)?;
                     let idx = e.args.first();
                     if let Some(a) = idx {
-                        compile_expression(a, ctx)?;
+                        compile_call_arg(a, ctx, e.span)?;
                     } else {
                         ctx.blocks[ctx.current_block].ops.push(HirOp::LoadConst {
                             value: HirConst::Int(0),
@@ -3410,7 +3657,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                     compile_expression(&m.object, ctx)?;
                     let cnt = e.args.first();
                     if let Some(a) = cnt {
-                        compile_expression(a, ctx)?;
+                        compile_call_arg(a, ctx, e.span)?;
                     } else {
                         ctx.blocks[ctx.current_block].ops.push(HirOp::LoadConst {
                             value: HirConst::Int(0),
@@ -3426,7 +3673,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                     compile_expression(&m.object, ctx)?;
                     let key = e.args.first();
                     if let Some(k) = key {
-                        compile_expression(k, ctx)?;
+                        compile_call_arg(k, ctx, e.span)?;
                     } else {
                         ctx.blocks[ctx.current_block].ops.push(HirOp::LoadConst {
                             value: HirConst::Undefined,
@@ -3440,12 +3687,20 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                     });
                 } else if prop == "propertyIsEnumerable" && e.args.len() == 1 {
                     compile_expression(&m.object, ctx)?;
-                    compile_expression(&e.args[0], ctx)?;
+                    compile_call_arg(&e.args[0], ctx, e.span)?;
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
                         builtin: b("Object", "propertyIsEnumerable"),
                         argc: 2,
                         span: e.span,
                     });
+                } else if args_has_spread(&e.args) {
+                    compile_call_with_spread(
+                        e.callee.as_ref(),
+                        Some(&m.object),
+                        &e.args,
+                        ctx,
+                        e.span,
+                    )?;
                 } else {
                     compile_expression(&m.object, ctx)?;
                     ctx.blocks[ctx.current_block]
@@ -3456,7 +3711,26 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                         span: e.span,
                     });
                     for arg in &e.args {
-                        compile_expression(arg, ctx)?;
+                        compile_call_arg(arg, ctx, e.span)?;
+                    }
+                    ctx.blocks[ctx.current_block].ops.push(HirOp::CallMethod {
+                        argc: e.args.len() as u32,
+                        span: e.span,
+                    });
+                }
+                }
+            }
+            Expression::FunctionExpr(fe) => {
+                if args_has_spread(&e.args) {
+                    compile_call_with_spread(e.callee.as_ref(), None, &e.args, ctx, e.span)?;
+                } else {
+                    ctx.blocks[ctx.current_block].ops.push(HirOp::LoadConst {
+                        value: HirConst::Undefined,
+                        span: e.span,
+                    });
+                    compile_function_expr(fe, ctx)?;
+                    for arg in &e.args {
+                        compile_call_arg(arg, ctx, e.span)?;
                     }
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallMethod {
                         argc: e.args.len() as u32,
@@ -3464,43 +3738,36 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                     });
                 }
             }
-            Expression::FunctionExpr(fe) => {
-                ctx.blocks[ctx.current_block].ops.push(HirOp::LoadConst {
-                    value: HirConst::Undefined,
-                    span: e.span,
-                });
-                compile_function_expr(fe, ctx)?;
-                for arg in &e.args {
-                    compile_expression(arg, ctx)?;
-                }
-                ctx.blocks[ctx.current_block].ops.push(HirOp::CallMethod {
-                    argc: e.args.len() as u32,
-                    span: e.span,
-                });
-            }
             Expression::ArrowFunction(af) => {
-                ctx.blocks[ctx.current_block].ops.push(HirOp::LoadConst {
-                    value: HirConst::Undefined,
-                    span: e.span,
-                });
-                let idx = *ctx.func_expr_map.get(&af.id).ok_or_else(|| {
-                    LowerError::Unsupported("arrow function not in map".to_string(), Some(af.span))
-                })?;
-                ctx.blocks[ctx.current_block].ops.push(HirOp::LoadConst {
-                    value: HirConst::Function(idx),
-                    span: af.span,
-                });
-                for arg in &e.args {
-                    compile_expression(arg, ctx)?;
+                if args_has_spread(&e.args) {
+                    compile_call_with_spread(e.callee.as_ref(), None, &e.args, ctx, e.span)?;
+                } else {
+                    ctx.blocks[ctx.current_block].ops.push(HirOp::LoadConst {
+                        value: HirConst::Undefined,
+                        span: e.span,
+                    });
+                    let idx = *ctx.func_expr_map.get(&af.id).ok_or_else(|| {
+                        LowerError::Unsupported("arrow function not in map".to_string(), Some(af.span))
+                    })?;
+                    ctx.blocks[ctx.current_block].ops.push(HirOp::LoadConst {
+                        value: HirConst::Function(idx),
+                        span: af.span,
+                    });
+                    for arg in &e.args {
+                        compile_call_arg(arg, ctx, e.span)?;
+                    }
+                    ctx.blocks[ctx.current_block].ops.push(HirOp::CallMethod {
+                        argc: e.args.len() as u32,
+                        span: e.span,
+                    });
                 }
-                ctx.blocks[ctx.current_block].ops.push(HirOp::CallMethod {
-                    argc: e.args.len() as u32,
-                    span: e.span,
-                });
+            }
+            Expression::Identifier(_) if args_has_spread(&e.args) => {
+                compile_call_with_spread(e.callee.as_ref(), None, &e.args, ctx, e.span)?;
             }
             Expression::Identifier(id) if id.name == "String" => {
                 for arg in &e.args {
-                    compile_expression(arg, ctx)?;
+                    compile_call_arg(arg, ctx, e.span)?;
                 }
                 ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
                     builtin: b("Type", "String"),
@@ -3510,7 +3777,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
             }
             Expression::Identifier(id) if id.name == "Error" => {
                 for arg in &e.args {
-                    compile_expression(arg, ctx)?;
+                    compile_call_arg(arg, ctx, e.span)?;
                 }
                 ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
                     builtin: b("Type", "Error"),
@@ -3520,7 +3787,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
             }
             Expression::Identifier(id) if id.name == "ReferenceError" => {
                 for arg in &e.args {
-                    compile_expression(arg, ctx)?;
+                    compile_call_arg(arg, ctx, e.span)?;
                 }
                 ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
                     builtin: b("Error", "ReferenceError"),
@@ -3530,7 +3797,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
             }
             Expression::Identifier(id) if id.name == "TypeError" => {
                 for arg in &e.args {
-                    compile_expression(arg, ctx)?;
+                    compile_call_arg(arg, ctx, e.span)?;
                 }
                 ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
                     builtin: b("Error", "TypeError"),
@@ -3540,7 +3807,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
             }
             Expression::Identifier(id) if id.name == "RangeError" => {
                 for arg in &e.args {
-                    compile_expression(arg, ctx)?;
+                    compile_call_arg(arg, ctx, e.span)?;
                 }
                 ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
                     builtin: b("Error", "RangeError"),
@@ -3550,7 +3817,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
             }
             Expression::Identifier(id) if id.name == "SyntaxError" => {
                 for arg in &e.args {
-                    compile_expression(arg, ctx)?;
+                    compile_call_arg(arg, ctx, e.span)?;
                 }
                 ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
                     builtin: b("Error", "SyntaxError"),
@@ -3560,7 +3827,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
             }
             Expression::Identifier(id) if id.name == "Number" => {
                 for arg in &e.args {
-                    compile_expression(arg, ctx)?;
+                    compile_call_arg(arg, ctx, e.span)?;
                 }
                 ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
                     builtin: b("Type", "Number"),
@@ -3570,7 +3837,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
             }
             Expression::Identifier(id) if id.name == "Boolean" => {
                 for arg in &e.args {
-                    compile_expression(arg, ctx)?;
+                    compile_call_arg(arg, ctx, e.span)?;
                 }
                 ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
                     builtin: b("Type", "Boolean"),
@@ -3580,7 +3847,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
             }
             Expression::Identifier(id) if id.name == "Symbol" => {
                 for arg in &e.args {
-                    compile_expression(arg, ctx)?;
+                    compile_call_arg(arg, ctx, e.span)?;
                 }
                 ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
                     builtin: b("Symbol", "create"),
@@ -3590,7 +3857,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
             }
             Expression::Identifier(id) if id.name == "print" => {
                 for arg in &e.args {
-                    compile_expression(arg, ctx)?;
+                    compile_call_arg(arg, ctx, e.span)?;
                 }
                 ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
                     builtin: b("Host", "print"),
@@ -3600,7 +3867,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
             }
             Expression::Identifier(id) if id.name == "eval" => {
                 for arg in &e.args {
-                    compile_expression(arg, ctx)?;
+                    compile_call_arg(arg, ctx, e.span)?;
                 }
                 ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
                     builtin: b("Global", "eval"),
@@ -3610,7 +3877,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
             }
             Expression::Identifier(id) if id.name == "encodeURI" => {
                 for arg in &e.args {
-                    compile_expression(arg, ctx)?;
+                    compile_call_arg(arg, ctx, e.span)?;
                 }
                 ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
                     builtin: b("Global", "encodeURI"),
@@ -3620,7 +3887,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
             }
             Expression::Identifier(id) if id.name == "encodeURIComponent" => {
                 for arg in &e.args {
-                    compile_expression(arg, ctx)?;
+                    compile_call_arg(arg, ctx, e.span)?;
                 }
                 ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
                     builtin: b("Global", "encodeURIComponent"),
@@ -3630,7 +3897,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
             }
             Expression::Identifier(id) if id.name == "decodeURI" => {
                 for arg in &e.args {
-                    compile_expression(arg, ctx)?;
+                    compile_call_arg(arg, ctx, e.span)?;
                 }
                 ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
                     builtin: b("Global", "decodeURI"),
@@ -3640,7 +3907,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
             }
             Expression::Identifier(id) if id.name == "decodeURIComponent" => {
                 for arg in &e.args {
-                    compile_expression(arg, ctx)?;
+                    compile_call_arg(arg, ctx, e.span)?;
                 }
                 ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
                     builtin: b("Global", "decodeURIComponent"),
@@ -3650,7 +3917,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
             }
             Expression::Identifier(id) if id.name == "RegExp" => {
                 for arg in &e.args {
-                    compile_expression(arg, ctx)?;
+                    compile_call_arg(arg, ctx, e.span)?;
                 }
                 ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
                     builtin: b("RegExp", "create"),
@@ -3660,7 +3927,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
             }
             Expression::Identifier(id) if id.name == "parseInt" => {
                 for arg in &e.args {
-                    compile_expression(arg, ctx)?;
+                    compile_call_arg(arg, ctx, e.span)?;
                 }
                 ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
                     builtin: b("Global", "parseInt"),
@@ -3670,7 +3937,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
             }
             Expression::Identifier(id) if id.name == "parseFloat" => {
                 for arg in &e.args {
-                    compile_expression(arg, ctx)?;
+                    compile_call_arg(arg, ctx, e.span)?;
                 }
                 ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
                     builtin: b("Global", "parseFloat"),
@@ -3681,7 +3948,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
             Expression::Identifier(id) => {
                 if let Some(&idx) = func_index.get(&id.name) {
                     for arg in &e.args {
-                        compile_expression(arg, ctx)?;
+                        compile_call_arg(arg, ctx, e.span)?;
                     }
                     ctx.blocks[ctx.current_block].ops.push(HirOp::Call {
                         func_index: idx,
@@ -3698,7 +3965,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                         span: id.span,
                     });
                     for arg in &e.args {
-                        compile_expression(arg, ctx)?;
+                        compile_call_arg(arg, ctx, e.span)?;
                     }
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallMethod {
                         argc: e.args.len() as u32,
@@ -3706,7 +3973,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                     });
                 } else if id.name == "Function" {
                     for arg in &e.args {
-                        compile_expression(arg, ctx)?;
+                        compile_call_arg(arg, ctx, e.span)?;
                     }
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
                         builtin: b("Global", "Function"),
@@ -3715,7 +3982,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                     });
                 } else if id.name == "isNaN" {
                     for arg in &e.args {
-                        compile_expression(arg, ctx)?;
+                        compile_call_arg(arg, ctx, e.span)?;
                     }
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
                         builtin: b("Global", "isNaN"),
@@ -3724,7 +3991,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                     });
                 } else if id.name == "isFinite" {
                     for arg in &e.args {
-                        compile_expression(arg, ctx)?;
+                        compile_call_arg(arg, ctx, e.span)?;
                     }
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
                         builtin: b("Global", "isFinite"),
@@ -3733,7 +4000,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                     });
                 } else if id.name == "parseInt" {
                     for arg in &e.args {
-                        compile_expression(arg, ctx)?;
+                        compile_call_arg(arg, ctx, e.span)?;
                     }
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
                         builtin: b("Global", "parseInt"),
@@ -3742,7 +4009,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                     });
                 } else if id.name == "parseFloat" {
                     for arg in &e.args {
-                        compile_expression(arg, ctx)?;
+                        compile_call_arg(arg, ctx, e.span)?;
                     }
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
                         builtin: b("Global", "parseFloat"),
@@ -3751,7 +4018,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                     });
                 } else if id.name == "eval" {
                     for arg in &e.args {
-                        compile_expression(arg, ctx)?;
+                        compile_call_arg(arg, ctx, e.span)?;
                     }
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
                         builtin: b("Global", "eval"),
@@ -3768,7 +4035,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                         span: id.span,
                     });
                     for arg in &e.args {
-                        compile_expression(arg, ctx)?;
+                        compile_call_arg(arg, ctx, e.span)?;
                     }
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallMethod {
                         argc: e.args.len() as u32,
@@ -3781,7 +4048,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                     });
                     compile_expression(&Expression::Identifier(id.clone()), ctx)?;
                     for arg in &e.args {
-                        compile_expression(arg, ctx)?;
+                        compile_call_arg(arg, ctx, e.span)?;
                     }
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallMethod {
                         argc: e.args.len() as u32,
@@ -3797,7 +4064,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                         span: id.span,
                     });
                     for arg in &e.args {
-                        compile_expression(arg, ctx)?;
+                        compile_call_arg(arg, ctx, e.span)?;
                     }
                     ctx.blocks[ctx.current_block].ops.push(HirOp::CallMethod {
                         argc: e.args.len() as u32,
@@ -3806,24 +4073,76 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                 }
             }
             _ => {
-                ctx.blocks[ctx.current_block].ops.push(HirOp::LoadConst {
-                    value: HirConst::Undefined,
-                    span: e.span,
-                });
-                compile_expression(e.callee.as_ref(), ctx)?;
-                for arg in &e.args {
-                    compile_expression(arg, ctx)?;
+                let only_spread =
+                    e.args.len() == 1 && matches!(&e.args[0], CallArg::Spread(_));
+                if only_spread {
+                    if let CallArg::Spread(spread_expr) = &e.args[0] {
+                        compile_expression(e.callee.as_ref(), ctx)?;
+                        ctx.blocks[ctx.current_block].ops.push(HirOp::Dup { span: e.span });
+                        ctx.blocks[ctx.current_block].ops.push(HirOp::GetProp {
+                            key: "apply".to_string(),
+                            span: e.span,
+                        });
+                        ctx.blocks[ctx.current_block].ops.push(HirOp::LoadConst {
+                            value: HirConst::Undefined,
+                            span: e.span,
+                        });
+                        compile_expression(spread_expr, ctx)?;
+                        ctx.blocks[ctx.current_block].ops.push(HirOp::CallMethod {
+                            argc: 2,
+                            span: e.span,
+                        });
+                    }
+                } else if args_has_spread(&e.args) {
+                    compile_call_with_spread(e.callee.as_ref(), None, &e.args, ctx, e.span)?;
+                } else {
+                    ctx.blocks[ctx.current_block].ops.push(HirOp::LoadConst {
+                        value: HirConst::Undefined,
+                        span: e.span,
+                    });
+                    compile_expression(e.callee.as_ref(), ctx)?;
+                    for arg in &e.args {
+                        compile_call_arg(arg, ctx, e.span)?;
+                    }
+                    ctx.blocks[ctx.current_block].ops.push(HirOp::CallMethod {
+                        argc: e.args.len() as u32,
+                        span: e.span,
+                    });
                 }
-                ctx.blocks[ctx.current_block].ops.push(HirOp::CallMethod {
-                    argc: e.args.len() as u32,
-                    span: e.span,
-                });
             }
         },
-        Expression::New(n) => match n.callee.as_ref() {
+        Expression::New(n) => {
+            let only_spread =
+                n.args.len() == 1 && matches!(&n.args[0], CallArg::Spread(_));
+            let has_spread = args_has_spread(&n.args);
+            if has_spread && !only_spread {
+                compile_new_with_spread(n.callee.as_ref(), &n.args, ctx, n.span)?;
+            } else if only_spread {
+                if let CallArg::Spread(spread_expr) = &n.args[0] {
+                    ctx.blocks[ctx.current_block].ops.push(HirOp::LoadConst {
+                        value: HirConst::Global("Reflect".to_string()),
+                        span: n.span,
+                    });
+                    ctx.blocks[ctx.current_block].ops.push(HirOp::GetProp {
+                        key: "construct".to_string(),
+                        span: n.span,
+                    });
+                    ctx.blocks[ctx.current_block].ops.push(HirOp::LoadConst {
+                        value: HirConst::Global("Reflect".to_string()),
+                        span: n.span,
+                    });
+                    compile_expression(n.callee.as_ref(), ctx)?;
+                    compile_expression(spread_expr, ctx)?;
+                    ctx.blocks[ctx.current_block].ops.push(HirOp::CallMethod {
+                        argc: 2,
+                        span: n.span,
+                    });
+                }
+            } else {
+            match n.callee.as_ref() {
             Expression::Identifier(id) if id.name == "Error" => {
                 for arg in &n.args {
-                    compile_expression(arg, ctx)?;
+                    compile_call_arg(arg, ctx, n.span)?;
                 }
                 ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
                     builtin: b("Type", "Error"),
@@ -3847,7 +4166,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
             }
             Expression::Identifier(id) if id.name == "Date" => {
                 for arg in &n.args {
-                    compile_expression(arg, ctx)?;
+                    compile_call_arg(arg, ctx, n.span)?;
                 }
                 ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
                     builtin: b("Date", "create"),
@@ -3857,7 +4176,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
             }
             Expression::Identifier(id) if id.name == "Error" => {
                 for arg in &n.args {
-                    compile_expression(arg, ctx)?;
+                    compile_call_arg(arg, ctx, n.span)?;
                 }
                 ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
                     builtin: b("Type", "Error"),
@@ -3867,7 +4186,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
             }
             Expression::Identifier(id) if id.name == "ReferenceError" => {
                 for arg in &n.args {
-                    compile_expression(arg, ctx)?;
+                    compile_call_arg(arg, ctx, n.span)?;
                 }
                 ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
                     builtin: b("Error", "ReferenceError"),
@@ -3877,7 +4196,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
             }
             Expression::Identifier(id) if id.name == "TypeError" => {
                 for arg in &n.args {
-                    compile_expression(arg, ctx)?;
+                    compile_call_arg(arg, ctx, n.span)?;
                 }
                 ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
                     builtin: b("Error", "TypeError"),
@@ -3887,7 +4206,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
             }
             Expression::Identifier(id) if id.name == "RangeError" => {
                 for arg in &n.args {
-                    compile_expression(arg, ctx)?;
+                    compile_call_arg(arg, ctx, n.span)?;
                 }
                 ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
                     builtin: b("Error", "RangeError"),
@@ -3897,7 +4216,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
             }
             Expression::Identifier(id) if id.name == "SyntaxError" => {
                 for arg in &n.args {
-                    compile_expression(arg, ctx)?;
+                    compile_call_arg(arg, ctx, n.span)?;
                 }
                 ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
                     builtin: b("Error", "SyntaxError"),
@@ -3913,7 +4232,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
             }
             Expression::Identifier(id) if id.name == "Int32Array" => {
                 for arg in &n.args {
-                    compile_expression(arg, ctx)?;
+                    compile_call_arg(arg, ctx, n.span)?;
                 }
                 ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
                     builtin: b("TypedArray", "Int32Array"),
@@ -3923,7 +4242,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
             }
             Expression::Identifier(id) if id.name == "Uint8Array" => {
                 for arg in &n.args {
-                    compile_expression(arg, ctx)?;
+                    compile_call_arg(arg, ctx, n.span)?;
                 }
                 ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
                     builtin: b("TypedArray", "Uint8Array"),
@@ -3933,7 +4252,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
             }
             Expression::Identifier(id) if id.name == "Uint8ClampedArray" => {
                 for arg in &n.args {
-                    compile_expression(arg, ctx)?;
+                    compile_call_arg(arg, ctx, n.span)?;
                 }
                 ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
                     builtin: b("TypedArray", "Uint8ClampedArray"),
@@ -3943,7 +4262,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
             }
             Expression::Identifier(id) if id.name == "ArrayBuffer" => {
                 for arg in &n.args {
-                    compile_expression(arg, ctx)?;
+                    compile_call_arg(arg, ctx, n.span)?;
                 }
                 ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
                     builtin: b("TypedArray", "ArrayBuffer"),
@@ -3953,7 +4272,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
             }
             Expression::Identifier(id) if id.name == "DataView" => {
                 for arg in &n.args {
-                    compile_expression(arg, ctx)?;
+                    compile_call_arg(arg, ctx, n.span)?;
                 }
                 ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
                     builtin: b("TypedArray", "DataView"),
@@ -3963,7 +4282,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
             }
             Expression::Identifier(id) if id.name == "RegExp" => {
                 for arg in &n.args {
-                    compile_expression(arg, ctx)?;
+                    compile_call_arg(arg, ctx, n.span)?;
                 }
                 ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
                     builtin: b("RegExp", "create"),
@@ -3977,7 +4296,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                     .or_else(|| ctx.func_index.get(&id.name))
                 {
                     for arg in &n.args {
-                        compile_expression(arg, ctx)?;
+                        compile_call_arg(arg, ctx, n.span)?;
                     }
                     ctx.blocks[ctx.current_block].ops.push(HirOp::New {
                         func_index: idx,
@@ -3987,7 +4306,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                 } else {
                     compile_expression(&Expression::Identifier(id.clone()), ctx)?;
                     for arg in &n.args {
-                        compile_expression(arg, ctx)?;
+                        compile_call_arg(arg, ctx, n.span)?;
                     }
                     ctx.blocks[ctx.current_block].ops.push(HirOp::NewMethod {
                         argc: n.args.len() as u32,
@@ -3998,22 +4317,26 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
             _ => {
                 compile_expression(n.callee.as_ref(), ctx)?;
                 for arg in &n.args {
-                    compile_expression(arg, ctx)?;
+                    compile_call_arg(arg, ctx, n.span)?;
                 }
                 ctx.blocks[ctx.current_block].ops.push(HirOp::NewMethod {
                     argc: n.args.len() as u32,
                     span: n.span,
                 });
             }
+        }
+            }
         },
         Expression::ObjectLiteral(e) => {
-            let proto_prop = e
-                .properties
-                .iter()
-                .find_map(|property| match &property.key {
-                    ObjectPropertyKey::Static(key) if key == "__proto__" => Some(&property.value),
+            let proto_prop = e.properties.iter().find_map(|property| {
+                let ObjectPropertyOrSpread::Property(p) = property else {
+                    return None;
+                };
+                match &p.key {
+                    ObjectPropertyKey::Static(key) if key == "__proto__" => Some(&p.value),
                     _ => None,
-                });
+                }
+            });
             if let Some(proto_expr) = proto_prop {
                 compile_expression(proto_expr, ctx)?;
                 ctx.blocks[ctx.current_block]
@@ -4025,69 +4348,115 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                     .push(HirOp::NewObject { span: e.span });
             }
             for property in &e.properties {
-                match &property.key {
-                    ObjectPropertyKey::Static(key) => {
-                        if key == "__proto__" {
-                            continue;
-                        }
+                match property {
+                    ObjectPropertyOrSpread::Spread(expr) => {
                         ctx.blocks[ctx.current_block]
                             .ops
                             .push(HirOp::Dup { span: e.span });
-                        compile_expression(&property.value, ctx)?;
-                        ctx.blocks[ctx.current_block]
-                            .ops
-                            .push(HirOp::Swap { span: e.span });
-                        ctx.blocks[ctx.current_block].ops.push(HirOp::SetProp {
-                            key: key.clone(),
+                        compile_expression(expr, ctx)?;
+                        ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
+                            builtin: b("Object", "assign"),
+                            argc: 2,
                             span: e.span,
                         });
                         ctx.blocks[ctx.current_block]
                             .ops
                             .push(HirOp::Pop { span: e.span });
                     }
-                    ObjectPropertyKey::Computed(key_expr) => {
-                        ctx.blocks[ctx.current_block]
-                            .ops
-                            .push(HirOp::Dup { span: e.span });
-                        compile_expression(key_expr, ctx)?;
-                        compile_expression(&property.value, ctx)?;
-                        ctx.blocks[ctx.current_block]
-                            .ops
-                            .push(HirOp::SetPropDyn { span: e.span });
-                        ctx.blocks[ctx.current_block]
-                            .ops
-                            .push(HirOp::Pop { span: e.span });
+                    ObjectPropertyOrSpread::Property(property) => {
+                        match &property.key {
+                            ObjectPropertyKey::Static(key) => {
+                                if key == "__proto__" {
+                                    continue;
+                                }
+                                ctx.blocks[ctx.current_block]
+                                    .ops
+                                    .push(HirOp::Dup { span: e.span });
+                                compile_expression(&property.value, ctx)?;
+                                ctx.blocks[ctx.current_block]
+                                    .ops
+                                    .push(HirOp::Swap { span: e.span });
+                                ctx.blocks[ctx.current_block].ops.push(HirOp::SetProp {
+                                    key: key.clone(),
+                                    span: e.span,
+                                });
+                                ctx.blocks[ctx.current_block]
+                                    .ops
+                                    .push(HirOp::Pop { span: e.span });
+                            }
+                            ObjectPropertyKey::Computed(key_expr) => {
+                                ctx.blocks[ctx.current_block]
+                                    .ops
+                                    .push(HirOp::Dup { span: e.span });
+                                compile_expression(key_expr, ctx)?;
+                                compile_expression(&property.value, ctx)?;
+                                ctx.blocks[ctx.current_block]
+                                    .ops
+                                    .push(HirOp::SetPropDyn { span: e.span });
+                                ctx.blocks[ctx.current_block]
+                                    .ops
+                                    .push(HirOp::Pop { span: e.span });
+                            }
+                        }
                     }
                 }
             }
         }
         Expression::ArrayLiteral(e) => {
-            ctx.blocks[ctx.current_block]
-                .ops
-                .push(HirOp::NewArray { span: e.span });
-            for (i, elem) in e.elements.iter().enumerate() {
+            let has_spread = e.elements.iter().any(|x| matches!(x, ArrayElement::Spread(_)));
+            if has_spread {
                 ctx.blocks[ctx.current_block]
                     .ops
-                    .push(HirOp::Dup { span: e.span });
-                match elem {
-                    Some(expr) => compile_expression(expr, ctx)?,
-                    None => {
-                        ctx.blocks[ctx.current_block].ops.push(HirOp::LoadConst {
-                            value: HirConst::Undefined,
-                            span: e.span,
-                        });
+                    .push(HirOp::NewArray { span: e.span });
+                for elem in &e.elements {
+                    ctx.blocks[ctx.current_block]
+                        .ops
+                        .push(HirOp::Dup { span: e.span });
+                    match elem {
+                        ArrayElement::Expr(expr) => compile_expression(expr, ctx)?,
+                        ArrayElement::Spread(expr) => compile_expression(expr, ctx)?,
+                        ArrayElement::Hole => {
+                            ctx.blocks[ctx.current_block].ops.push(HirOp::LoadConst {
+                                value: HirConst::Undefined,
+                                span: e.span,
+                            });
+                        }
                     }
+                    ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
+                        builtin: b("Array", "concat"),
+                        argc: 2,
+                        span: e.span,
+                    });
                 }
+            } else {
                 ctx.blocks[ctx.current_block]
                     .ops
-                    .push(HirOp::Swap { span: e.span });
-                ctx.blocks[ctx.current_block].ops.push(HirOp::SetProp {
-                    key: i.to_string(),
-                    span: e.span,
-                });
-                ctx.blocks[ctx.current_block]
-                    .ops
-                    .push(HirOp::Pop { span: e.span });
+                    .push(HirOp::NewArray { span: e.span });
+                for (i, elem) in e.elements.iter().enumerate() {
+                    ctx.blocks[ctx.current_block]
+                        .ops
+                        .push(HirOp::Dup { span: e.span });
+                    match elem {
+                        ArrayElement::Expr(expr) => compile_expression(expr, ctx)?,
+                        ArrayElement::Hole => {
+                            ctx.blocks[ctx.current_block].ops.push(HirOp::LoadConst {
+                                value: HirConst::Undefined,
+                                span: e.span,
+                            });
+                        }
+                        ArrayElement::Spread(_) => {}
+                    }
+                    ctx.blocks[ctx.current_block]
+                        .ops
+                        .push(HirOp::Swap { span: e.span });
+                    ctx.blocks[ctx.current_block].ops.push(HirOp::SetProp {
+                        key: i.to_string(),
+                        span: e.span,
+                    });
+                    ctx.blocks[ctx.current_block]
+                        .ops
+                        .push(HirOp::Pop { span: e.span });
+                }
             }
         }
         Expression::Member(e) => {
@@ -4277,6 +4646,38 @@ mod tests {
         } else {
             panic!("expected Return(3), got {:?}", completion);
         }
+    }
+
+    #[test]
+    fn lower_array_at() {
+        let result = crate::driver::Driver::run(
+            "function main() { let a = [10, 20, 30]; return a.at(1); }",
+        )
+        .expect("run");
+        assert_eq!(result, 20, "Array.prototype.at(1)");
+    }
+
+    #[test]
+    fn lower_string_at() {
+        let result = crate::driver::Driver::run(
+            "function main() { let s = \"hello\"; return s.at(1).charCodeAt(0); }",
+        )
+        .expect("run");
+        assert_eq!(result, 101, "String.prototype.at(1) is 'e' (101)");
+    }
+
+    #[test]
+    fn lower_call_with_spread() {
+        let result = crate::driver::Driver::run(
+            "function main() { return Math.max(...[1, 2, 3]); }",
+        )
+        .expect("run");
+        assert_eq!(result, 3, "Math.max(...[1,2,3]) => 3");
+        let result2 = crate::driver::Driver::run(
+            "function main() { return Math.max(0, ...[1, 2, 3]); }",
+        )
+        .expect("run");
+        assert_eq!(result2, 3, "Math.max(0, ...[1,2,3]) => 3");
     }
 
     #[test]

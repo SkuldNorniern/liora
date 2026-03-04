@@ -239,6 +239,7 @@ fn format_const(c: &ConstEntry) -> String {
     match c {
         ConstEntry::Int(n) => n.to_string(),
         ConstEntry::Float(n) => n.to_string(),
+        ConstEntry::BigInt(s) => format!("{}n", s),
         ConstEntry::String(s) => format!("{:?}", s),
         ConstEntry::Null => "null".to_string(),
         ConstEntry::Undefined => "undefined".to_string(),
@@ -261,6 +262,7 @@ mod tests {
             captured_names: vec![],
             rest_param_index: None,
             handlers: vec![],
+            arguments_slot: None,
         };
         let s = disassemble(&chunk);
         assert!(s.contains("PushConst"));

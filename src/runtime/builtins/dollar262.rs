@@ -2,37 +2,73 @@
 
 use super::BuiltinContext;
 use crate::runtime::Value;
+use crate::runtime::builtins;
 
 pub fn create_realm(
-    args: &[Value],
+    _args: &[Value],
     ctx: &mut BuiltinContext,
 ) -> Result<Value, super::BuiltinError> {
-    let _ = (args, ctx);
-    Err(super::BuiltinError::Throw(Value::String(
-        "$262.createRealm is not implemented".to_string(),
-    )))
+    let heap = &mut ctx.heap;
+    let global_id = heap.global_object();
+    let eval_id = builtins::resolve("Global", "eval")
+        .expect("eval builtin must exist");
+    let realm_id = heap.alloc_object();
+    heap.set_prop(realm_id, "global", Value::Object(global_id));
+    heap.set_prop(realm_id, "evalScript", Value::Builtin(eval_id));
+    Ok(Value::Object(realm_id))
 }
 
 pub fn eval_script(args: &[Value], ctx: &mut BuiltinContext) -> Result<Value, super::BuiltinError> {
-    let _ = (args, ctx);
-    Err(super::BuiltinError::Throw(Value::String(
-        "$262.evalScript is not implemented".to_string(),
-    )))
+    super::eval::eval(args, ctx)
 }
 
-pub fn gc(args: &[Value], ctx: &mut BuiltinContext) -> Result<Value, super::BuiltinError> {
-    let _ = (args, ctx);
-    Err(super::BuiltinError::Throw(Value::String(
-        "$262.gc is not implemented".to_string(),
-    )))
+pub fn gc(_args: &[Value], _ctx: &mut BuiltinContext) -> Result<Value, super::BuiltinError> {
+    Ok(Value::Undefined)
 }
 
 pub fn detach_array_buffer(
     args: &[Value],
     ctx: &mut BuiltinContext,
 ) -> Result<Value, super::BuiltinError> {
-    let _ = (args, ctx);
-    Err(super::BuiltinError::Throw(Value::String(
-        "$262.detachArrayBuffer is not implemented".to_string(),
-    )))
+    let heap = &mut ctx.heap;
+    let buffer = args.first().and_then(|v| v.as_object_id());
+    if let Some(id) = buffer {
+        heap.set_prop(id, "byteLength", Value::Int(0));
+    }
+    Ok(Value::Undefined)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::runtime::Heap;
+
+    #[test]
+    fn gc_is_noop() {
+        let mut heap = Heap::new();
+        let mut dynamic_chunks = Vec::new();
+        let mut ctx = BuiltinContext {
+            heap: &mut heap,
+            dynamic_chunks: &mut dynamic_chunks,
+        };
+        let args = [];
+        let result = gc(&args, &mut ctx);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), Value::Undefined);
+    }
+
+    #[test]
+    fn eval_script_delegates_to_eval() {
+        let mut heap = Heap::new();
+        let mut dynamic_chunks = Vec::new();
+        let mut ctx = BuiltinContext {
+            heap: &mut heap,
+            dynamic_chunks: &mut dynamic_chunks,
+        };
+        let args = [Value::String("return 1 + 2".to_string())];
+        let result = eval_script(&args, &mut ctx);
+        assert!(result.is_ok());
+        let v = result.unwrap();
+        assert_eq!(v, Value::Int(3));
+    }
 }

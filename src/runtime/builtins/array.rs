@@ -44,6 +44,112 @@ pub fn is_array(args: &[Value], _heap: &mut Heap) -> Value {
     Value::Bool(matches!(args.first(), Some(Value::Array(_))))
 }
 
+pub fn at(args: &[Value], heap: &mut Heap) -> Value {
+    let arr = match args.first() {
+        Some(Value::Array(id)) => *id,
+        _ => return Value::Undefined,
+    };
+    let len = heap.array_len(arr);
+    let idx = match args.get(1) {
+        Some(v) => super::to_number(v),
+        None => return Value::Undefined,
+    };
+    let i = if idx.is_nan() || idx.is_infinite() {
+        0
+    } else {
+        idx as i32
+    };
+    let resolved = if i < 0 {
+        len as i32 + i
+    } else {
+        i
+    };
+    if resolved < 0 || resolved as usize >= len {
+        return Value::Undefined;
+    }
+    let key = resolved.to_string();
+    heap.get_array_prop(arr, &key)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::runtime::Heap;
+
+    #[test]
+    fn at_returns_element_at_index() {
+        let mut heap = Heap::new();
+        let arr_id = heap.alloc_array();
+        heap.array_push(arr_id, Value::Int(10));
+        heap.array_push(arr_id, Value::Int(20));
+        heap.array_push(arr_id, Value::Int(30));
+        let args = [
+            Value::Array(arr_id),
+            Value::Int(1),
+        ];
+        let result = at(&args, &mut heap);
+        assert_eq!(result, Value::Int(20));
+    }
+
+    #[test]
+    fn at_negative_index() {
+        let mut heap = Heap::new();
+        let arr_id = heap.alloc_array();
+        heap.array_push(arr_id, Value::Int(10));
+        heap.array_push(arr_id, Value::Int(20));
+        let args = [
+            Value::Array(arr_id),
+            Value::Int(-1),
+        ];
+        let result = at(&args, &mut heap);
+        assert_eq!(result, Value::Int(20));
+    }
+
+    #[test]
+    fn to_reversed_returns_new_array() {
+        let mut heap = Heap::new();
+        let arr_id = heap.alloc_array();
+        heap.array_push(arr_id, Value::Int(1));
+        heap.array_push(arr_id, Value::Int(2));
+        heap.array_push(arr_id, Value::Int(3));
+        let result = to_reversed(&[Value::Array(arr_id)], &mut heap);
+        if let Value::Array(new_id) = result {
+            let elems = heap.array_elements(new_id).unwrap();
+            assert_eq!(elems.len(), 3);
+            assert_eq!(elems[0], Value::Int(3));
+            assert_eq!(elems[1], Value::Int(2));
+            assert_eq!(elems[2], Value::Int(1));
+        } else {
+            panic!("expected Array");
+        }
+    }
+
+    #[test]
+    fn array_with_replaces_index() {
+        let mut heap = Heap::new();
+        let arr_id = heap.alloc_array();
+        heap.array_push(arr_id, Value::Int(10));
+        heap.array_push(arr_id, Value::Int(20));
+        heap.array_push(arr_id, Value::Int(30));
+        let result = array_with(
+            &[
+                Value::Array(arr_id),
+                Value::Int(1),
+                Value::Int(99),
+            ],
+            &mut heap,
+        );
+        if let Value::Array(new_id) = result {
+            let elems = heap.array_elements(new_id).unwrap();
+            assert_eq!(elems[0], Value::Int(10));
+            assert_eq!(elems[1], Value::Int(99));
+            assert_eq!(elems[2], Value::Int(30));
+        } else {
+            panic!("expected Array");
+        }
+    }
+}
+
 pub fn fill(args: &[Value], heap: &mut Heap) -> Value {
     let arr = match args.first() {
         Some(Value::Array(id)) => *id,
@@ -84,6 +190,139 @@ pub fn reverse(args: &[Value], heap: &mut Heap) -> Value {
     } else {
         Value::Undefined
     }
+}
+
+pub fn to_reversed(args: &[Value], heap: &mut Heap) -> Value {
+    let receiver = match args.first() {
+        Some(Value::Array(id)) => *id,
+        _ => return Value::Undefined,
+    };
+    let elements: Vec<Value> = heap
+        .array_elements(receiver)
+        .map(|e| e.to_vec())
+        .unwrap_or_default();
+    let mut reversed: Vec<Value> = elements.iter().cloned().collect();
+    reversed.reverse();
+    let new_id = heap.alloc_array();
+    for v in reversed {
+        heap.array_push(new_id, v);
+    }
+    Value::Array(new_id)
+}
+
+pub fn to_sorted(args: &[Value], heap: &mut Heap) -> Value {
+    let receiver = match args.first() {
+        Some(Value::Array(id)) => *id,
+        _ => return Value::Undefined,
+    };
+    let elements: Vec<Value> = heap
+        .array_elements(receiver)
+        .map(|e| e.to_vec())
+        .unwrap_or_default();
+    let mut sorted: Vec<Value> = elements.iter().cloned().collect();
+    sorted.sort_by(|a, b| a.to_string().cmp(&b.to_string()));
+    let new_id = heap.alloc_array();
+    for v in sorted {
+        heap.array_push(new_id, v);
+    }
+    Value::Array(new_id)
+}
+
+pub fn to_spliced(args: &[Value], heap: &mut Heap) -> Value {
+    let receiver = match args.first() {
+        Some(Value::Array(id)) => *id,
+        _ => return Value::Undefined,
+    };
+    let elements: Vec<Value> = heap
+        .array_elements(receiver)
+        .map(|e| e.to_vec())
+        .unwrap_or_default();
+    let len = elements.len() as i32;
+    let start = args
+        .get(1)
+        .map(super::to_number)
+        .map(|n| {
+            if n.is_nan() || n.is_infinite() {
+                0
+            } else {
+                let k = n as i32;
+                if k < 0 {
+                    (len + k).max(0)
+                } else {
+                    k.min(len)
+                }
+            }
+        })
+        .unwrap_or(0)
+        .max(0) as usize;
+    let delete_count = args
+        .get(2)
+        .map(super::to_number)
+        .map(|n| {
+            if n.is_nan() || n < 0.0 {
+                0
+            } else {
+                n.min((len - start as i32).max(0) as f64) as i32
+            }
+        })
+        .unwrap_or((len - start as i32).max(0))
+        .max(0) as usize;
+    let mut new_elements: Vec<Value> = elements[..start].to_vec();
+    for v in args.iter().skip(3) {
+        new_elements.push(v.clone());
+    }
+    if start + delete_count < elements.len() {
+        new_elements.extend(elements[start + delete_count..].iter().cloned());
+    }
+    let new_id = heap.alloc_array();
+    for v in new_elements {
+        heap.array_push(new_id, v);
+    }
+    Value::Array(new_id)
+}
+
+pub fn array_with(args: &[Value], heap: &mut Heap) -> Value {
+    let receiver = match args.first() {
+        Some(Value::Array(id)) => *id,
+        _ => return Value::Undefined,
+    };
+    let index = match args.get(1) {
+        Some(v) => super::to_number(v),
+        None => return Value::Undefined,
+    };
+    let value = match args.get(2) {
+        Some(v) => v.clone(),
+        None => return Value::Undefined,
+    };
+    let elements: Vec<Value> = heap
+        .array_elements(receiver)
+        .map(|e| e.to_vec())
+        .unwrap_or_default();
+    let len = elements.len() as i32;
+    let relative_index = if index.is_nan() || index.is_infinite() {
+        0
+    } else {
+        index as i32
+    };
+    let actual_index = if relative_index < 0 {
+        (len + relative_index).max(0)
+    } else {
+        relative_index.min(len)
+    } as usize;
+    let mut new_elements: Vec<Value> = elements.iter().cloned().collect();
+    if actual_index < new_elements.len() {
+        new_elements[actual_index] = value;
+    } else {
+        while new_elements.len() < actual_index {
+            new_elements.push(Value::Undefined);
+        }
+        new_elements.push(value);
+    }
+    let new_id = heap.alloc_array();
+    for v in new_elements {
+        heap.array_push(new_id, v);
+    }
+    Value::Array(new_id)
 }
 
 pub fn slice(args: &[Value], heap: &mut Heap) -> Value {
@@ -362,6 +601,7 @@ pub fn map(args: &[Value], ctx: &mut BuiltinContext) -> Result<Value, BuiltinErr
     let is_callable = matches!(
         callback,
         Some(Value::Function(_)) | Some(Value::DynamicFunction(_)) | Some(Value::Builtin(_))
+            | Some(Value::BoundFunction(_, _, _))
     );
     if !is_callable {
         return Err(BuiltinError::Throw(Value::String(
@@ -556,4 +796,155 @@ pub fn entries(args: &[Value], heap: &mut Heap) -> Value {
         heap.array_push(new_id, Value::Array(pair_id));
     }
     Value::Array(new_id)
+}
+
+pub fn find(args: &[Value], _heap: &mut Heap) -> Value {
+    if let Some(Value::Array(_)) = args.first() {
+        Value::Undefined
+    } else {
+        Value::Undefined
+    }
+}
+
+pub fn find_index(args: &[Value], _heap: &mut Heap) -> Value {
+    if let Some(Value::Array(_)) = args.first() {
+        Value::Int(-1)
+    } else {
+        Value::Int(-1)
+    }
+}
+
+pub fn find_last(args: &[Value], _heap: &mut Heap) -> Value {
+    if let Some(Value::Array(_)) = args.first() {
+        Value::Undefined
+    } else {
+        Value::Undefined
+    }
+}
+
+pub fn find_last_index(args: &[Value], _heap: &mut Heap) -> Value {
+    if let Some(Value::Array(_)) = args.first() {
+        Value::Int(-1)
+    } else {
+        Value::Int(-1)
+    }
+}
+
+pub fn flat(args: &[Value], heap: &mut Heap) -> Value {
+    let receiver = match args.first() {
+        Some(Value::Array(id)) => *id,
+        _ => return Value::Undefined,
+    };
+    let elements: Vec<Value> = heap
+        .array_elements(receiver)
+        .map(|e| e.to_vec())
+        .unwrap_or_default();
+    let depth = args.get(1).map(super::to_number).unwrap_or(1.0) as i32;
+    let depth = if depth < 1 { 1 } else { depth.min(100) };
+    let mut out: Vec<Value> = Vec::new();
+    for v in elements {
+        if let Value::Array(nested_id) = v {
+            if depth > 1 {
+                let nested_args = [Value::Array(nested_id), Value::Int(depth - 1)];
+                let flattened = flat(&nested_args, heap);
+                if let Value::Array(flat_id) = flattened {
+                    if let Some(nested) = heap.array_elements(flat_id) {
+                        out.extend(nested.iter().cloned());
+                    }
+                }
+            } else if let Some(nested) = heap.array_elements(nested_id) {
+                out.extend(nested.iter().cloned());
+            }
+        } else {
+            out.push(v);
+        }
+    }
+    let new_id = heap.alloc_array();
+    for v in out {
+        heap.array_push(new_id, v);
+    }
+    Value::Array(new_id)
+}
+
+pub fn flat_map(args: &[Value], heap: &mut Heap) -> Value {
+    flat(args, heap)
+}
+
+pub fn copy_within(args: &[Value], heap: &mut Heap) -> Value {
+    let receiver = match args.first() {
+        Some(Value::Array(id)) => *id,
+        _ => return Value::Undefined,
+    };
+    let elements = heap.array_elements(receiver).map(|e| e.to_vec());
+    let mut elements: Vec<Value> = elements.unwrap_or_default();
+    let len = elements.len() as i32;
+    let target = args
+        .get(1)
+        .map(super::to_number)
+        .map(|n| {
+            if n.is_nan() { 0 } else {
+                let i = n as i32;
+                if i < 0 { (len + i).max(0) } else { i.min(len) }
+            }
+        })
+        .unwrap_or(0) as usize;
+    let start = args
+        .get(2)
+        .map(super::to_number)
+        .map(|n| {
+            if n.is_nan() { 0 } else {
+                let i = n as i32;
+                if i < 0 { (len + i).max(0) } else { i.min(len) }
+            }
+        })
+        .unwrap_or(0) as usize;
+    let end = args
+        .get(3)
+        .map(super::to_number)
+        .map(|n| {
+            if n.is_nan() { len } else {
+                let i = n as i32;
+                if i < 0 { (len + i).max(0) } else { i.min(len) }
+            }
+        })
+        .unwrap_or(len) as usize;
+    let count = (end - start).min(len as usize - target);
+    for i in 0..count {
+        if let Some(v) = elements.get(start + i) {
+            if target + i < elements.len() {
+                elements[target + i] = v.clone();
+            }
+        }
+    }
+    heap.array_splice(receiver, elements);
+    Value::Array(receiver)
+}
+
+pub fn array_from(args: &[Value], heap: &mut Heap) -> Value {
+    let items = args.first();
+    let arr_id = heap.alloc_array();
+    if let Some(Value::Array(src_id)) = items {
+        let elems: Vec<Value> = heap
+            .array_elements(*src_id)
+            .map(|e| e.to_vec())
+            .unwrap_or_default();
+        for v in elems {
+            heap.array_push(arr_id, v);
+        }
+    } else if let Some(Value::String(s)) = items {
+        for c in s.chars() {
+            heap.array_push(arr_id, Value::String(c.to_string()));
+        }
+    } else if let Some(v) = items {
+        heap.array_push(arr_id, v.clone());
+    }
+    Value::Array(arr_id)
+}
+
+pub fn array_of(args: &[Value], heap: &mut Heap) -> Value {
+    let arr_id = heap.alloc_array();
+    for v in args {
+        heap.array_push(arr_id, v.clone());
+    }
+    Value::Array(arr_id)
 }

@@ -181,6 +181,7 @@ pub enum HirOp {
 pub enum HirConst {
     Int(i64),
     Float(f64),
+    BigInt(String),
     Null,
     Undefined,
     String(String),

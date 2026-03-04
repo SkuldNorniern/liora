@@ -11,33 +11,34 @@ fn make_error(heap: &mut Heap, msg: String, constructor_name: &str) -> Value {
 }
 
 pub fn error(args: &[Value], heap: &mut Heap) -> Value {
-    let msg = args.first().map(|v| v.to_string()).unwrap_or_default();
-    make_error(heap, msg, "Error")
+    make_error(heap, error_message_arg(args), "Error")
+}
+
+fn error_message_arg(args: &[Value]) -> String {
+    args.first()
+        .filter(|v| !matches!(v, Value::Undefined | Value::Null))
+        .map(|v| v.to_string())
+        .unwrap_or_default()
 }
 
 pub fn reference_error(args: &[Value], heap: &mut Heap) -> Value {
-    let msg = args.first().map(|v| v.to_string()).unwrap_or_default();
-    make_error(heap, msg, "ReferenceError")
+    make_error(heap, error_message_arg(args), "ReferenceError")
 }
 
 pub fn type_error(args: &[Value], heap: &mut Heap) -> Value {
-    let msg = args.first().map(|v| v.to_string()).unwrap_or_default();
-    make_error(heap, msg, "TypeError")
+    make_error(heap, error_message_arg(args), "TypeError")
 }
 
 pub fn range_error(args: &[Value], heap: &mut Heap) -> Value {
-    let msg = args.first().map(|v| v.to_string()).unwrap_or_default();
-    make_error(heap, msg, "RangeError")
+    make_error(heap, error_message_arg(args), "RangeError")
 }
 
 pub fn syntax_error(args: &[Value], heap: &mut Heap) -> Value {
-    let msg = args.first().map(|v| v.to_string()).unwrap_or_default();
-    make_error(heap, msg, "SyntaxError")
+    make_error(heap, error_message_arg(args), "SyntaxError")
 }
 
 pub fn uri_error(args: &[Value], heap: &mut Heap) -> Value {
-    let msg = args.first().map(|v| v.to_string()).unwrap_or_default();
-    make_error(heap, msg, "URIError")
+    make_error(heap, error_message_arg(args), "URIError")
 }
 
 pub fn is_error(args: &[Value], heap: &mut Heap) -> Value {

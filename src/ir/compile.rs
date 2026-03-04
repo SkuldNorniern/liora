@@ -74,6 +74,7 @@ pub fn hir_to_bytecode(func: &HirFunction) -> CompiledFunction {
                     constants.push(match value {
                         HirConst::Int(n) => ConstEntry::Int(*n),
                         HirConst::Float(n) => ConstEntry::Float(*n),
+                        HirConst::BigInt(s) => ConstEntry::BigInt(s.clone()),
                         HirConst::Null => ConstEntry::Null,
                         HirConst::Undefined => ConstEntry::Undefined,
                         HirConst::String(s) => ConstEntry::String(s.clone()),
@@ -330,6 +331,10 @@ pub fn hir_to_bytecode(func: &HirFunction) -> CompiledFunction {
             captured_names: func.captured_names.clone(),
             rest_param_index: func.rest_param_index,
             handlers,
+            arguments_slot: func
+                .named_locals
+                .iter()
+                .find_map(|(n, s)| (n == "arguments").then_some(*s)),
         },
     }
 }

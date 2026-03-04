@@ -16,12 +16,14 @@ pub struct BytecodeChunk {
     pub captured_names: Vec<String>,
     pub rest_param_index: Option<u32>,
     pub handlers: Vec<ExceptionHandler>,
+    pub arguments_slot: Option<u32>,
 }
 
 #[derive(Debug, Clone)]
 pub enum ConstEntry {
     Int(i64),
     Float(f64),
+    BigInt(String),
     String(String),
     Null,
     Undefined,
@@ -99,6 +101,7 @@ mod tests {
             captured_names: vec![],
             rest_param_index: None,
             handlers: vec![],
+            arguments_slot: None,
         };
         assert_eq!(chunk.constants.len(), 1);
     }

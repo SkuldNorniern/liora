@@ -1,4 +1,4 @@
-use super::{to_number, to_prop_key};
+use super::{to_number, to_prop_key, BuiltinContext, BuiltinError};
 use crate::runtime::{Heap, Value};
 
 fn html_escape(s: &str) -> String {
@@ -51,6 +51,38 @@ pub fn to_upper_case(args: &[Value], _heap: &mut Heap) -> Value {
     Value::String(s.to_uppercase())
 }
 
+pub fn starts_with(args: &[Value], _heap: &mut Heap) -> Value {
+    let s = string_html_receiver(args);
+    let search = args.get(1).map(|v| v.to_string()).unwrap_or_default();
+    let pos = args
+        .get(2)
+        .map(|v| super::to_number(v))
+        .unwrap_or(0.0);
+    let pos = if pos.is_nan() || pos < 0.0 {
+        0
+    } else {
+        pos.min(s.len() as f64) as usize
+    };
+    Value::Bool(s.get(pos..).unwrap_or("").starts_with(&search))
+}
+
+pub fn ends_with(args: &[Value], _heap: &mut Heap) -> Value {
+    let s = string_html_receiver(args);
+    let search = args.get(1).map(|v| v.to_string()).unwrap_or_default();
+    let len = s.len() as f64;
+    let end = args
+        .get(2)
+        .map(|v| super::to_number(v))
+        .unwrap_or(len);
+    let end = if end.is_nan() || end < 0.0 {
+        len
+    } else {
+        end.min(len)
+    };
+    let end_pos = (end as usize).min(s.len());
+    Value::Bool(s.get(..end_pos).unwrap_or("").ends_with(&search))
+}
+
 pub fn repeat(args: &[Value], _heap: &mut Heap) -> Value {
     let s = match args.first() {
         Some(Value::String(x)) => x.clone(),
@@ -86,6 +118,179 @@ pub fn from_char_code(args: &[Value], _heap: &mut Heap) -> Value {
     Value::String(s)
 }
 
+fn match_impl(receiver: &Value, regexp: Option<&Value>, heap: &mut Heap) -> Value {
+    let s = match receiver {
+        Value::String(x) => x.clone(),
+        _ => receiver.to_string(),
+    };
+    if let Some(Value::Object(id)) = regexp {
+        let pattern = match heap.get_prop(*id, "__regexp_pattern") {
+            Value::String(p) => p.clone(),
+            _ => return Value::Null,
+        };
+        if let Some(start) = s.find(pattern.as_str()) {
+            let matched = s.get(start..start + pattern.len()).unwrap_or("").to_string();
+            let arr_id = heap.alloc_array();
+            heap.array_push(arr_id, Value::String(matched));
+            heap.set_array_prop(arr_id, "index", Value::Int(start as i32));
+            heap.set_array_prop(arr_id, "input", Value::String(s.clone()));
+            return Value::Array(arr_id);
+        }
+    }
+    Value::Null
+}
+
+pub fn match_throwing(args: &[Value], ctx: &mut BuiltinContext) -> Result<Value, BuiltinError> {
+    let receiver = args.first().cloned().unwrap_or(Value::Undefined);
+    let regexp_val = args.get(1);
+    if let Some(Value::Object(reg_id)) = regexp_val {
+        let matcher = ctx.heap.get_prop(*reg_id, "Symbol.match");
+        let callable = matches!(
+            matcher,
+            Value::Function(_)
+                | Value::DynamicFunction(_)
+                | Value::Builtin(_)
+                | Value::BoundBuiltin(_, _, _)
+                | Value::BoundFunction(_, _, _)
+        );
+        if !matches!(matcher, Value::Undefined) && callable {
+            return Err(BuiltinError::Invoke {
+                callee: matcher,
+                this_arg: Value::Object(*reg_id),
+                args: vec![receiver],
+                new_object: None,
+            });
+        }
+    }
+    Ok(match_impl(&receiver, regexp_val, ctx.heap))
+}
+
+fn search_impl(receiver: &Value, regexp: Option<&Value>, heap: &mut Heap) -> Value {
+    let result = match_impl(receiver, regexp, heap);
+    match result {
+        Value::Array(id) => {
+            let idx = heap.get_array_prop(id, "index");
+            match idx {
+                Value::Int(n) => Value::Int(n),
+                _ => Value::Int(-1),
+            }
+        }
+        _ => Value::Int(-1),
+    }
+}
+
+pub fn search_throwing(args: &[Value], ctx: &mut BuiltinContext) -> Result<Value, BuiltinError> {
+    let receiver = args.first().cloned().unwrap_or(Value::Undefined);
+    let regexp_val = args.get(1);
+    if let Some(Value::Object(reg_id)) = regexp_val {
+        let searcher = ctx.heap.get_prop(*reg_id, "Symbol.search");
+        let callable = matches!(
+            searcher,
+            Value::Function(_)
+                | Value::DynamicFunction(_)
+                | Value::Builtin(_)
+                | Value::BoundBuiltin(_, _, _)
+                | Value::BoundFunction(_, _, _)
+        );
+        if !matches!(searcher, Value::Undefined) && callable {
+            return Err(BuiltinError::Invoke {
+                callee: searcher,
+                this_arg: Value::Object(*reg_id),
+                args: vec![receiver],
+                new_object: None,
+            });
+        }
+    }
+    Ok(search_impl(&receiver, regexp_val, ctx.heap))
+}
+
+fn replace_impl(receiver: &Value, search_val: Option<&Value>, replace_val: Option<&Value>, heap: &mut Heap) -> Value {
+    let s = match receiver {
+        Value::String(x) => x.clone(),
+        _ => receiver.to_string(),
+    };
+    match search_val {
+        Some(Value::Object(id)) => {
+            let pattern = match heap.get_prop(*id, "__regexp_pattern") {
+                Value::String(p) => p.clone(),
+                _ => return Value::String(s),
+            };
+            let flags = match heap.get_prop(*id, "__regexp_flags") {
+                Value::String(f) => f.clone(),
+                _ => String::new(),
+            };
+            let repl = replace_val.map(|v| v.to_string()).unwrap_or_default();
+            let result = if flags.contains('g') {
+                s.replace(pattern.as_str(), repl.as_str())
+            } else {
+                s.replacen(pattern.as_str(), repl.as_str(), 1)
+            };
+            Value::String(result)
+        }
+        Some(v) => {
+            let search = v.to_string();
+            let repl = replace_val.map(|v| v.to_string()).unwrap_or_default();
+            Value::String(s.replacen(&search, &repl, 1))
+        }
+        None => Value::String(s),
+    }
+}
+
+pub fn replace_throwing(args: &[Value], ctx: &mut BuiltinContext) -> Result<Value, BuiltinError> {
+    let receiver = args.first().cloned().unwrap_or(Value::Undefined);
+    let search_val = args.get(1);
+    let replace_val = args.get(2).cloned();
+    if let Some(Value::Object(search_id)) = search_val {
+        let replacer = ctx.heap.get_prop(*search_id, "Symbol.replace");
+        let callable = matches!(
+            replacer,
+            Value::Function(_)
+                | Value::DynamicFunction(_)
+                | Value::Builtin(_)
+                | Value::BoundBuiltin(_, _, _)
+                | Value::BoundFunction(_, _, _)
+        );
+        if !matches!(replacer, Value::Undefined) && callable {
+            let mut repl_args = vec![receiver];
+            if let Some(r) = &replace_val {
+                repl_args.push(r.clone());
+            }
+            return Err(BuiltinError::Invoke {
+                callee: replacer,
+                this_arg: Value::Object(*search_id),
+                args: repl_args,
+                new_object: None,
+            });
+        }
+    }
+    Ok(replace_impl(&receiver, search_val, replace_val.as_ref(), ctx.heap))
+}
+
+pub fn at(args: &[Value], _heap: &mut Heap) -> Value {
+    let s = match args.first() {
+        Some(Value::String(x)) => x.clone(),
+        Some(v) => v.to_string(),
+        None => return Value::Undefined,
+    };
+    let idx = args.get(1).map(to_number).unwrap_or(f64::NAN);
+    let i = if idx.is_nan() || idx.is_infinite() {
+        0
+    } else {
+        idx as i32
+    };
+    let chars: Vec<char> = s.chars().collect();
+    let len = chars.len() as i32;
+    let pos = if i < 0 { len + i } else { i };
+    if pos < 0 || pos >= len {
+        return Value::Undefined;
+    }
+    let ch = chars
+        .get(pos as usize)
+        .map(|c| c.to_string())
+        .unwrap_or_default();
+    Value::String(ch)
+}
+
 pub fn char_at(args: &[Value], _heap: &mut Heap) -> Value {
     let s = match args.first() {
         Some(Value::String(x)) => x.clone(),
@@ -108,12 +313,29 @@ pub fn char_at(args: &[Value], _heap: &mut Heap) -> Value {
     Value::String(ch)
 }
 
-pub fn split(args: &[Value], heap: &mut Heap) -> Value {
-    let receiver = match args.first() {
-        Some(v) => v,
-        None => return Value::Undefined,
+pub fn char_code_at(args: &[Value], _heap: &mut Heap) -> Value {
+    let s = match args.first() {
+        Some(Value::String(x)) => x.clone(),
+        Some(v) => v.to_string(),
+        None => return Value::Number(f64::NAN),
     };
-    let sep_val = args.get(1);
+    let idx = args.get(1).map(to_number).unwrap_or(0.0);
+    let i = if idx.is_nan() || idx.is_infinite() {
+        0
+    } else {
+        idx as i32
+    };
+    let chars: Vec<char> = s.chars().collect();
+    let len = chars.len() as i32;
+    let pos = if i < 0 { (len + i).max(0) } else { i.min(len) };
+    let code = chars.get(pos as usize).map_or(f64::NAN, |c| {
+        let mut utf16 = [0u16; 2];
+        c.encode_utf16(&mut utf16)[0] as f64
+    });
+    Value::Number(code)
+}
+
+fn split_impl(receiver: &Value, sep_val: Option<&Value>, heap: &mut Heap) -> Value {
     let s = match receiver {
         Value::String(x) => x.clone(),
         _ => receiver.to_string(),
@@ -136,6 +358,32 @@ pub fn split(args: &[Value], heap: &mut Heap) -> Value {
         heap.array_push(new_id, p);
     }
     Value::Array(new_id)
+}
+
+pub fn split_throwing(args: &[Value], ctx: &mut BuiltinContext) -> Result<Value, BuiltinError> {
+    let receiver = args.first().cloned().unwrap_or(Value::Undefined);
+    let sep_val = args.get(1);
+    if let Some(Value::Object(sep_id)) = sep_val {
+        let splitter = ctx.heap.get_prop(*sep_id, "Symbol.split");
+        let callable = matches!(
+            splitter,
+            Value::Function(_)
+                | Value::DynamicFunction(_)
+                | Value::Builtin(_)
+                | Value::BoundBuiltin(_, _, _)
+                | Value::BoundFunction(_, _, _)
+        );
+        if !matches!(splitter, Value::Undefined) && callable {
+            let limit = args.get(2).cloned().unwrap_or(Value::Undefined);
+            return Err(BuiltinError::Invoke {
+                callee: splitter,
+                this_arg: Value::Object(*sep_id),
+                args: vec![receiver, limit],
+                new_object: None,
+            });
+        }
+    }
+    Ok(split_impl(&receiver, sep_val, ctx.heap))
 }
 
 pub fn anchor(args: &[Value], _heap: &mut Heap) -> Value {
@@ -269,4 +517,58 @@ pub fn trim_right(args: &[Value], _heap: &mut Heap) -> Value {
         None => String::new(),
     };
     Value::String(s.trim_end().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::runtime::{Heap, Value};
+
+    #[test]
+    fn starts_with_basic() {
+        let mut heap = Heap::new();
+        assert_eq!(
+            starts_with(&[Value::String("hello".to_string()), Value::String("he".to_string())], &mut heap),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            starts_with(&[Value::String("hello".to_string()), Value::String("lo".to_string())], &mut heap),
+            Value::Bool(false)
+        );
+    }
+
+    #[test]
+    fn ends_with_basic() {
+        let mut heap = Heap::new();
+        assert_eq!(
+            ends_with(&[Value::String("hello".to_string()), Value::String("lo".to_string())], &mut heap),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            ends_with(&[Value::String("hello".to_string()), Value::String("he".to_string())], &mut heap),
+            Value::Bool(false)
+        );
+    }
+
+    #[test]
+    fn char_code_at_returns_code_at_index() {
+        let mut heap = Heap::new();
+        let args = [
+            Value::String("hello".to_string()),
+            Value::Int(1),
+        ];
+        let result = char_code_at(&args, &mut heap);
+        assert_eq!(result, Value::Number(101.0), "'e' has code 101");
+    }
+
+    #[test]
+    fn char_code_at_out_of_range_returns_nan() {
+        let mut heap = Heap::new();
+        let args = [
+            Value::String("hi".to_string()),
+            Value::Int(99),
+        ];
+        let result = char_code_at(&args, &mut heap);
+        assert!(matches!(result, Value::Number(n) if n.is_nan()));
+    }
 }

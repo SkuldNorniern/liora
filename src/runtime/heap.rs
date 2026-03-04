@@ -28,6 +28,8 @@ pub struct Heap {
     array_prototype_id: Option<usize>,
     regexp_prototype_id: Option<usize>,
     function_props: HashMap<usize, HashMap<String, Value>>,
+    deleted_builtin_props: HashSet<(u8, String)>,
+    is_html_dda_object_id: Option<usize>,
 }
 
 impl Default for Heap {
@@ -45,6 +47,8 @@ impl Default for Heap {
             array_prototype_id: None,
             regexp_prototype_id: None,
             function_props: HashMap::new(),
+            deleted_builtin_props: HashSet::new(),
+            is_html_dda_object_id: None,
         };
         heap.init_globals();
         heap
@@ -60,7 +64,12 @@ impl Heap {
         let global_id = self.alloc_object();
         self.global_object_id = global_id;
 
+        let obj_proto_id = self.alloc_object();
+        self.set_prop(obj_proto_id, "toString", Value::Builtin(b("Object", "toString")));
+        self.set_prop(obj_proto_id, "hasOwnProperty", Value::Builtin(b("Object", "hasOwnProperty")));
+        self.set_prop(obj_proto_id, "propertyIsEnumerable", Value::Builtin(b("Object", "propertyIsEnumerable")));
         let obj_id = self.alloc_object();
+        self.set_prop(obj_id, "prototype", Value::Object(obj_proto_id));
         self.set_prop(obj_id, "create", Value::Builtin(b("Object", "create")));
         self.set_prop(obj_id, "keys", Value::Builtin(b("Object", "keys")));
         self.set_prop(obj_id, "assign", Value::Builtin(b("Object", "assign")));
@@ -76,9 +85,11 @@ impl Heap {
         self.set_prop(obj_id, "isSealed", Value::Builtin(b("Object", "isSealed")));
         self.set_prop(obj_id, "hasOwn", Value::Builtin(b("Object", "hasOwn")));
         self.set_prop(obj_id, "is", Value::Builtin(b("Object", "is")));
+        self.set_prop(obj_id, "fromEntries", Value::Builtin(b("Object", "fromEntries")));
         self.set_prop(obj_id, "getOwnPropertyDescriptor", Value::Builtin(b("Object", "getOwnPropertyDescriptor")));
         self.set_prop(obj_id, "getOwnPropertyNames", Value::Builtin(b("Object", "getOwnPropertyNames")));
         self.set_prop(obj_id, "defineProperty", Value::Builtin(b("Object", "defineProperty")));
+        self.set_prop(obj_id, "defineProperties", Value::Builtin(b("Object", "defineProperties")));
         self.set_prop(global_id, "Object", Value::Object(obj_id));
 
         let arr_proto_id = self.alloc_object();
@@ -93,6 +104,7 @@ impl Heap {
         self.set_prop(arr_proto_id, "unshift", Value::Builtin(b("Array", "unshift")));
         self.set_prop(arr_proto_id, "reverse", Value::Builtin(b("Array", "reverse")));
         self.set_prop(arr_proto_id, "includes", Value::Builtin(b("Array", "includes")));
+        self.set_prop(arr_proto_id, "at", Value::Builtin(b("Array", "at")));
         self.set_prop(arr_proto_id, "fill", Value::Builtin(b("Array", "fill")));
         self.set_prop(arr_proto_id, "lastIndexOf", Value::Builtin(b("Array", "lastIndexOf")));
         self.set_prop(arr_proto_id, "toString", Value::Builtin(b("Array", "toString")));
@@ -110,11 +122,24 @@ impl Heap {
         self.set_prop(arr_proto_id, "values", Value::Builtin(b("Array", "values")));
         self.set_prop(arr_proto_id, "keys", Value::Builtin(b("Array", "keys")));
         self.set_prop(arr_proto_id, "entries", Value::Builtin(b("Array", "entries")));
+        self.set_prop(arr_proto_id, "find", Value::Builtin(b("Array", "find")));
+        self.set_prop(arr_proto_id, "findIndex", Value::Builtin(b("Array", "findIndex")));
+        self.set_prop(arr_proto_id, "findLast", Value::Builtin(b("Array", "findLast")));
+        self.set_prop(arr_proto_id, "findLastIndex", Value::Builtin(b("Array", "findLastIndex")));
+        self.set_prop(arr_proto_id, "flat", Value::Builtin(b("Array", "flat")));
+        self.set_prop(arr_proto_id, "flatMap", Value::Builtin(b("Array", "flatMap")));
+        self.set_prop(arr_proto_id, "copyWithin", Value::Builtin(b("Array", "copyWithin")));
+        self.set_prop(arr_proto_id, "toReversed", Value::Builtin(b("Array", "toReversed")));
+        self.set_prop(arr_proto_id, "toSorted", Value::Builtin(b("Array", "toSorted")));
+        self.set_prop(arr_proto_id, "toSpliced", Value::Builtin(b("Array", "toSpliced")));
+        self.set_prop(arr_proto_id, "with", Value::Builtin(b("Array", "with")));
         self.array_prototype_id = Some(arr_proto_id);
 
         let arr_id = self.alloc_object();
         self.set_prop(arr_id, "prototype", Value::Object(arr_proto_id));
         self.set_prop(arr_id, "isArray", Value::Builtin(b("Array", "isArray")));
+        self.set_prop(arr_id, "from", Value::Builtin(b("Array", "from")));
+        self.set_prop(arr_id, "of", Value::Builtin(b("Array", "of")));
         self.set_prop(global_id, "Array", Value::Object(arr_id));
 
         let math_id = self.alloc_object();
@@ -127,6 +152,9 @@ impl Heap {
         self.set_prop(math_id, "round", Value::Builtin(b("Math", "round")));
         self.set_prop(math_id, "sqrt", Value::Builtin(b("Math", "sqrt")));
         self.set_prop(math_id, "random", Value::Builtin(b("Math", "random")));
+        self.set_prop(math_id, "sign", Value::Builtin(b("Math", "sign")));
+        self.set_prop(math_id, "trunc", Value::Builtin(b("Math", "trunc")));
+        self.set_prop(math_id, "sumPrecise", Value::Builtin(b("Math", "sumPrecise")));
         self.set_prop(global_id, "Math", Value::Object(math_id));
 
         let json_id = self.alloc_object();
@@ -136,10 +164,20 @@ impl Heap {
 
         let str_proto_id = self.alloc_object();
         self.set_prop(str_proto_id, "split", Value::Builtin(b("String", "split")));
+        self.set_prop(str_proto_id, "match", Value::Builtin(b("String", "match")));
+        self.set_prop(str_proto_id, "search", Value::Builtin(b("String", "search")));
+        self.set_prop(str_proto_id, "replace", Value::Builtin(b("String", "replace")));
+        self.set_prop(str_proto_id, "replaceAll", Value::Builtin(b("String", "replace")));
         self.set_prop(str_proto_id, "trim", Value::Builtin(b("String", "trim")));
+        self.set_prop(str_proto_id, "startsWith", Value::Builtin(b("String", "startsWith")));
+        self.set_prop(str_proto_id, "endsWith", Value::Builtin(b("String", "endsWith")));
         self.set_prop(str_proto_id, "toLowerCase", Value::Builtin(b("String", "toLowerCase")));
         self.set_prop(str_proto_id, "toUpperCase", Value::Builtin(b("String", "toUpperCase")));
         self.set_prop(str_proto_id, "charAt", Value::Builtin(b("String", "charAt")));
+        self.set_prop(str_proto_id, "at", Value::Builtin(b("String", "at")));
+        self.set_prop(str_proto_id, "includes", Value::Builtin(b("Array", "includes")));
+        self.set_prop(str_proto_id, "indexOf", Value::Builtin(b("Array", "indexOf")));
+        self.set_prop(str_proto_id, "lastIndexOf", Value::Builtin(b("Array", "lastIndexOf")));
         self.set_prop(str_proto_id, "repeat", Value::Builtin(b("String", "repeat")));
         self.set_prop(str_proto_id, "anchor", Value::Builtin(b("String", "anchor")));
         self.set_prop(str_proto_id, "big", Value::Builtin(b("String", "big")));
@@ -175,6 +213,7 @@ impl Heap {
             "MAX_SAFE_INTEGER",
             Value::Number(9007199254740991.0),
         );
+        self.set_prop(num_id, "isInteger", Value::Builtin(b("Number", "isInteger")));
         self.set_prop(num_id, "isSafeInteger", Value::Builtin(b("Number", "isSafeInteger")));
         self.set_prop(global_id, "Number", Value::Object(num_id));
 
@@ -238,8 +277,29 @@ impl Heap {
 
         let regexp_proto_id = self.alloc_object();
         self.regexp_prototype_id = Some(regexp_proto_id);
+        self.set_prop(regexp_proto_id, "exec", Value::Builtin(b("RegExp", "exec")));
         self.set_prop(regexp_proto_id, "test", Value::Builtin(b("RegExp", "test")));
         self.set_prop(regexp_proto_id, "compile", Value::Builtin(b("RegExp", "compile")));
+        self.set_prop(
+            regexp_proto_id,
+            "Symbol.match",
+            Value::Builtin(b("RegExp", "symbol_match")),
+        );
+        self.set_prop(
+            regexp_proto_id,
+            "Symbol.search",
+            Value::Builtin(b("RegExp", "symbol_search")),
+        );
+        self.set_prop(
+            regexp_proto_id,
+            "Symbol.replace",
+            Value::Builtin(b("RegExp", "symbol_replace")),
+        );
+        self.set_prop(
+            regexp_proto_id,
+            "Symbol.split",
+            Value::Builtin(b("RegExp", "symbol_split")),
+        );
         let regexp_id = self.alloc_object();
         self.set_prop(regexp_id, "prototype", Value::Object(regexp_proto_id));
         self.set_prop(regexp_id, "escape", Value::Builtin(b("RegExp", "escape")));
@@ -264,9 +324,11 @@ impl Heap {
         self.set_prop(date_proto_id, "toString", Value::Builtin(b("Date", "toString")));
         self.set_prop(date_proto_id, "toISOString", Value::Builtin(b("Date", "toISOString")));
         self.set_prop(date_proto_id, "getYear", Value::Builtin(b("Date", "getYear")));
+        self.set_prop(date_proto_id, "getFullYear", Value::Builtin(b("Date", "getFullYear")));
         self.set_prop(date_proto_id, "setYear", Value::Builtin(b("Date", "setYear")));
         self.set_prop(date_proto_id, "toGMTString", Value::Builtin(b("Date", "toGMTString")));
         self.set_prop(date_id, "prototype", Value::Object(date_proto_id));
+        self.set_prop(date_id, "__call__", Value::Builtin(b("Date", "create")));
         self.set_prop(date_id, "now", Value::Builtin(b("Date", "now")));
         self.set_prop(date_id, "getTime", Value::Builtin(b("Date", "getTime")));
         self.set_prop(date_id, "toString", Value::Builtin(b("Date", "toString")));
@@ -276,7 +338,24 @@ impl Heap {
         self.set_prop(global_id, "NaN", Value::Number(f64::NAN));
         self.set_prop(global_id, "Infinity", Value::Number(f64::INFINITY));
         self.set_prop(global_id, "globalThis", Value::Object(global_id));
-        self.set_prop(global_id, "Symbol", Value::Builtin(b("Symbol", "create")));
+
+        let sym_match = self.alloc_symbol(Some("Symbol.match".to_string()));
+        let sym_replace = self.alloc_symbol(Some("Symbol.replace".to_string()));
+        let sym_search = self.alloc_symbol(Some("Symbol.search".to_string()));
+        let sym_split = self.alloc_symbol(Some("Symbol.split".to_string()));
+        let sym_iterator = self.alloc_symbol(Some("Symbol.iterator".to_string()));
+        let sym_species = self.alloc_symbol(Some("Symbol.species".to_string()));
+        let sym_to_string_tag = self.alloc_symbol(Some("Symbol.toStringTag".to_string()));
+        let symbol_id = self.alloc_object();
+        self.set_prop(symbol_id, "__call__", Value::Builtin(b("Symbol", "create")));
+        self.set_prop(symbol_id, "match", Value::Symbol(sym_match));
+        self.set_prop(symbol_id, "replace", Value::Symbol(sym_replace));
+        self.set_prop(symbol_id, "search", Value::Symbol(sym_search));
+        self.set_prop(symbol_id, "split", Value::Symbol(sym_split));
+        self.set_prop(symbol_id, "iterator", Value::Symbol(sym_iterator));
+        self.set_prop(symbol_id, "species", Value::Symbol(sym_species));
+        self.set_prop(symbol_id, "toStringTag", Value::Symbol(sym_to_string_tag));
+        self.set_prop(global_id, "Symbol", Value::Object(symbol_id));
 
         let console_id = self.alloc_object();
         self.set_prop(console_id, "log", Value::Builtin(b("Host", "print")));
@@ -306,10 +385,18 @@ impl Heap {
         self.set_prop(global_id, "BigInt64Array", Value::Builtin(int32array));
         self.set_prop(global_id, "BigUint64Array", Value::Builtin(int32array));
         self.set_prop(global_id, "ArrayBuffer", Value::Builtin(b("TypedArray", "ArrayBuffer")));
-        self.set_prop(global_id, "Function", Value::Builtin(b("Global", "Function")));
+        let func_proto_id = self.alloc_object();
+        self.set_prop(func_proto_id, "call", Value::Builtin(b("Function", "call")));
+        self.set_prop(func_proto_id, "bind", Value::Builtin(b("Function", "bind")));
+        self.set_prop(func_proto_id, "apply", Value::Builtin(b("Function", "apply")));
+        let func_id = self.alloc_object();
+        self.set_prop(func_id, "prototype", Value::Object(func_proto_id));
+        self.set_prop(func_id, "__call__", Value::Builtin(b("Global", "Function")));
+        self.set_prop(global_id, "Function", Value::Object(func_id));
         self.set_prop(global_id, "isNaN", Value::Builtin(b("Global", "isNaN")));
         self.set_prop(global_id, "isFinite", Value::Builtin(b("Global", "isFinite")));
         let reflect_id = self.alloc_object();
+        self.set_prop(reflect_id, "get", Value::Builtin(b("Reflect", "get")));
         self.set_prop(reflect_id, "apply", Value::Builtin(b("Reflect", "apply")));
         self.set_prop(reflect_id, "construct", Value::Builtin(b("Reflect", "construct")));
         self.set_prop(global_id, "Reflect", Value::Object(reflect_id));
@@ -328,6 +415,9 @@ impl Heap {
     pub fn init_test262_globals(&mut self) {
         let global_id = self.global_object_id;
         let dollar262_id = self.alloc_object();
+        let is_html_dda_id = self.alloc_object();
+        self.is_html_dda_object_id = Some(is_html_dda_id);
+        self.set_prop(dollar262_id, "IsHTMLDDA", Value::Object(is_html_dda_id));
         self.set_prop(dollar262_id, "global", Value::Object(global_id));
         self.set_prop(
             dollar262_id,
@@ -355,6 +445,10 @@ impl Heap {
         let intl_id = self.alloc_object();
         self.set_prop(global_id, "Intl", Value::Object(intl_id));
         self.set_prop(global_id, "testResult", Value::Undefined);
+    }
+
+    pub fn is_html_dda_object(&self, obj_id: usize) -> bool {
+        self.is_html_dda_object_id == Some(obj_id)
     }
 
     pub fn get_global(&self, name: &str) -> Value {
@@ -537,7 +631,7 @@ impl Heap {
             }
             if let Ok(idx) = key.parse::<usize>() {
                 if idx < elements.len() {
-                    return elements.get(idx).cloned().unwrap_or(Value::Undefined);
+                    return elements[idx].clone();
                 }
                 if let Some(props) = self.array_props.get(arr_id) {
                     if let Some(v) = props.get(key) {
@@ -604,12 +698,17 @@ impl Heap {
                 } else if let Some(props) = self.array_props.get_mut(arr_id) {
                     props.insert(key.to_string(), value);
                 }
+            } else if let Some(props) = self.array_props.get_mut(arr_id) {
+                props.insert(key.to_string(), value);
             }
         }
     }
 
     pub fn array_push(&mut self, arr_id: usize, value: Value) {
         if let Some(elements) = self.arrays.get_mut(arr_id) {
+            if elements.is_empty() {
+                elements.reserve(4096);
+            }
             elements.push(value);
         }
     }
@@ -690,6 +789,16 @@ impl Heap {
             .unwrap_or(false)
     }
 
+    pub fn delete_builtin_prop(&mut self, builtin_id: u8, key: &str) {
+        self.deleted_builtin_props
+            .insert((builtin_id, key.to_string()));
+    }
+
+    pub fn builtin_prop_deleted(&self, builtin_id: u8, key: &str) -> bool {
+        self.deleted_builtin_props
+            .contains(&(builtin_id, key.to_string()))
+    }
+
     pub fn record_error_object(&mut self, obj_id: usize) {
         self.error_object_ids.insert(obj_id);
     }
@@ -705,26 +814,65 @@ impl Heap {
                     crate::runtime::Value::String(s) => s,
                     _ => String::new(),
                 };
+                let name_str = if name.is_empty() {
+                    if let crate::runtime::Value::Object(ctor_id) = self.get_prop(*id, "constructor")
+                    {
+                        if let crate::runtime::Value::String(s) = self.get_prop(ctor_id, "name") {
+                            if !s.is_empty() {
+                                s
+                            } else {
+                                String::new()
+                            }
+                        } else {
+                            String::new()
+                        }
+                    } else {
+                        if self.is_error_object(*id) {
+                            "Error".to_string()
+                        } else {
+                            String::new()
+                        }
+                    }
+                } else {
+                    name.clone()
+                };
                 let message_val = self.get_prop(*id, "message");
                 let message = match &message_val {
-                    crate::runtime::Value::String(s) => s.clone(),
+                    crate::runtime::Value::String(s) => {
+                        if s == "undefined" {
+                            String::new()
+                        } else {
+                            s.clone()
+                        }
+                    }
+                    crate::runtime::Value::Undefined | crate::runtime::Value::Null => String::new(),
                     _ => message_val.to_string(),
                 };
-                let name_str = if name.is_empty() {
-                    "Error"
-                } else {
-                    name.as_str()
-                };
-                if self.is_error_object(*id) || !name.is_empty() || !message.is_empty() {
+                if self.is_error_object(*id) || !name_str.is_empty() || !message.is_empty() {
                     if message.is_empty() {
-                        name_str.to_string()
+                        name_str
                     } else {
                         format!("{}: {}", name_str, message)
                     }
                 } else {
-                    "Thrown object".to_string()
+                    let ctor = self.get_prop(*id, "constructor");
+                    let fallback = if let crate::runtime::Value::Object(ctor_id) = ctor {
+                        if let crate::runtime::Value::String(s) = self.get_prop(ctor_id, "name") {
+                            if !s.is_empty() {
+                                format!("[object {}]", s)
+                            } else {
+                                "[object Object]".to_string()
+                            }
+                        } else {
+                            "[object Object]".to_string()
+                        }
+                    } else {
+                        "[object Object]".to_string()
+                    };
+                    fallback
                 }
             }
+            crate::runtime::Value::Undefined => "thrown undefined".to_string(),
             _ => v.to_string(),
         }
     }
@@ -774,5 +922,36 @@ mod tests {
         heap.set_prop(obj, "message", Value::String("expected true".to_string()));
         let v = Value::Object(obj);
         assert_eq!(heap.format_thrown_value(&v), "Test262Error: expected true");
+    }
+
+    #[test]
+    fn format_thrown_value_plain_object_uses_constructor_name() {
+        let mut heap = Heap::new();
+        let ctor = heap.alloc_object();
+        heap.set_prop(ctor, "name", Value::String("CustomError".to_string()));
+        let obj = heap.alloc_object();
+        heap.set_prop(obj, "constructor", Value::Object(ctor));
+        let v = Value::Object(obj);
+        assert_eq!(heap.format_thrown_value(&v), "CustomError");
+    }
+
+    #[test]
+    fn format_thrown_value_plain_object_fallback() {
+        let mut heap = Heap::new();
+        let ctor = heap.alloc_object();
+        heap.set_prop(ctor, "name", Value::String("".to_string()));
+        let obj = heap.alloc_object();
+        heap.set_prop(obj, "constructor", Value::Object(ctor));
+        let v = Value::Object(obj);
+        assert_eq!(heap.format_thrown_value(&v), "[object Object]");
+    }
+
+    #[test]
+    fn delete_builtin_prop_tracks_deletion() {
+        let mut heap = Heap::new();
+        let id = crate::runtime::builtins::resolve("String", "anchor").expect("anchor");
+        assert!(!heap.builtin_prop_deleted(id, "length"));
+        heap.delete_builtin_prop(id, "length");
+        assert!(heap.builtin_prop_deleted(id, "length"));
     }
 }

@@ -1,18 +1,40 @@
-use super::to_prop_key;
+use super::to_prop_key_with_heap;
 use crate::runtime::builtins;
 use crate::runtime::{Heap, Value};
 
-fn builtin_arity(id: u8) -> i32 {
-    builtins::get(id)
-        .map(|b| match (b.category, b.name) {
-            ("String", "anchor") | ("String", "fontcolor") | ("String", "fontsize")
-            | ("String", "link") => 1,
-            ("String", "substr") => 2,
-            ("Date", "setYear") => 1,
-            ("RegExp", "compile") => 2,
-            _ => 0,
-        })
-        .unwrap_or(0)
+pub fn from_entries(args: &[Value], heap: &mut Heap) -> Value {
+    let iterable = match args.first() {
+        Some(v) => v,
+        None => return Value::Object(heap.alloc_object()),
+    };
+    let obj_id = heap.alloc_object();
+    let entries: Vec<(Value, Value)> = match iterable {
+        Value::Array(arr_id) => heap
+            .array_elements(*arr_id)
+            .map(|elems| {
+                elems
+                    .iter()
+                    .filter_map(|e| {
+                        if let Value::Array(pair_id) = e {
+                            let pair = heap.array_elements(*pair_id).map(|v| v.to_vec());
+                            let pair = pair.unwrap_or_default();
+                            let key = pair.get(0).cloned().unwrap_or(Value::Undefined);
+                            let val = pair.get(1).cloned().unwrap_or(Value::Undefined);
+                            Some((key, val))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    };
+    for (key, val) in entries {
+        let k = to_prop_key_with_heap(&key, heap);
+        heap.set_prop(obj_id, &k, val);
+    }
+    Value::Object(obj_id)
 }
 
 pub fn create(args: &[Value], heap: &mut Heap) -> Value {
@@ -27,10 +49,26 @@ pub fn create(args: &[Value], heap: &mut Heap) -> Value {
 
 pub fn keys(args: &[Value], heap: &mut Heap) -> Value {
     let arr_id = heap.alloc_array();
-    if let Some(Value::Object(obj_id)) = args.first() {
-        for key in heap.object_keys(*obj_id) {
-            heap.array_push(arr_id, Value::String(key));
+    let keys: Vec<String> = match args.first() {
+        Some(Value::Object(obj_id)) => heap.object_keys(*obj_id),
+        Some(Value::Array(id)) => {
+            let len = heap.array_len(*id);
+            (0..len).map(|i| i.to_string()).collect()
         }
+        Some(Value::Builtin(id)) => {
+            let mut keys = Vec::new();
+            if !heap.builtin_prop_deleted(*id, "length") {
+                keys.push("length".to_string());
+            }
+            if !heap.builtin_prop_deleted(*id, "name") {
+                keys.push("name".to_string());
+            }
+            keys
+        }
+        _ => Vec::new(),
+    };
+    for key in keys {
+        heap.array_push(arr_id, Value::String(key));
     }
     Value::Array(arr_id)
 }
@@ -56,13 +94,15 @@ pub fn assign(args: &[Value], heap: &mut Heap) -> Value {
 }
 
 pub fn has_own_property(args: &[Value], heap: &mut Heap) -> Value {
-    let key = args.get(1).map(to_prop_key).unwrap_or_default();
+    let key = args.get(1).map(|v| to_prop_key_with_heap(v, heap)).unwrap_or_default();
     let result = match args.first() {
         Some(Value::Object(id)) => heap.object_has_own_property(*id, &key),
         Some(Value::Function(function_index)) => {
             heap.function_has_own_property(*function_index, &key)
         }
-        Some(Value::Builtin(_)) => key == "length" || key == "name",
+        Some(Value::Builtin(id)) => {
+            (key == "length" || key == "name") && !heap.builtin_prop_deleted(*id, &key)
+        }
         _ => false,
     };
     Value::Bool(result)
@@ -91,12 +131,13 @@ pub fn set_prototype_of(args: &[Value], heap: &mut Heap) -> Value {
 }
 
 pub fn property_is_enumerable(args: &[Value], heap: &mut Heap) -> Value {
-    let key = args.get(1).map(to_prop_key).unwrap_or_default();
+    let key = args.get(1).map(|v| to_prop_key_with_heap(v, heap)).unwrap_or_default();
     let result = match args.first() {
         Some(Value::Object(id)) => heap.object_has_own_property(*id, &key),
         Some(Value::Function(function_index)) => {
             key != "name" && heap.function_has_own_property(*function_index, &key)
         }
+        Some(Value::Builtin(_)) => false,
         _ => false,
     };
     Value::Bool(result)
@@ -110,6 +151,34 @@ pub fn get_prototype_of(args: &[Value], heap: &mut Heap) -> Value {
         },
         _ => Value::Null,
     }
+}
+
+pub fn to_string(args: &[Value], heap: &mut Heap) -> Value {
+    let tag = match args.first() {
+        Some(Value::Object(id)) => {
+            if heap.is_error_object(*id) {
+                "Error"
+            } else {
+                "Object"
+            }
+        }
+        Some(Value::Function(_)) | Some(Value::DynamicFunction(_)) | Some(Value::Builtin(_))
+        | Some(Value::BoundBuiltin(_, _, _))
+        | Some(Value::BoundFunction(_, _, _)) => "Function",
+        Some(Value::Array(_)) => "Array",
+        Some(Value::Map(_)) => "Map",
+        Some(Value::Set(_)) => "Set",
+        Some(Value::Date(_)) => "Date",
+        Some(Value::String(_)) => "String",
+        Some(Value::Number(_)) | Some(Value::Int(_)) => "Number",
+        Some(Value::BigInt(_)) => "BigInt",
+        Some(Value::Bool(_)) => "Boolean",
+        Some(Value::Symbol(_)) => "Symbol",
+        Some(Value::Null) => "Null",
+        Some(Value::Undefined) => "Undefined",
+        None => "Object",
+    };
+    Value::String(format!("[object {}]", tag))
 }
 
 pub fn freeze(args: &[Value], _heap: &mut Heap) -> Value {
@@ -133,13 +202,15 @@ pub fn is_sealed(_args: &[Value], _heap: &mut Heap) -> Value {
 }
 
 pub fn has_own(args: &[Value], heap: &mut Heap) -> Value {
-    let key = args.get(1).map(to_prop_key).unwrap_or_default();
+    let key = args.get(1).map(|v| to_prop_key_with_heap(v, heap)).unwrap_or_default();
     let result = match args.first() {
         Some(Value::Object(id)) => heap.object_has_own_property(*id, &key),
         Some(Value::Function(function_index)) => {
             heap.function_has_own_property(*function_index, &key)
         }
-        Some(Value::Builtin(_)) => key == "length" || key == "name",
+        Some(Value::Builtin(id)) => {
+            (key == "length" || key == "name") && !heap.builtin_prop_deleted(*id, &key)
+        }
         _ => false,
     };
     Value::Bool(result)
@@ -189,14 +260,19 @@ pub fn get_own_property_descriptor(args: &[Value], heap: &mut Heap) -> Value {
         Some(value) => value,
         None => return Value::Undefined,
     };
-    let key = args.get(1).map(to_prop_key).unwrap_or_default();
+    let key = args.get(1).map(|v| to_prop_key_with_heap(v, heap)).unwrap_or_default();
     match target {
         Value::Object(id) => {
             if !heap.object_has_own_property(*id, &key) {
                 return Value::Undefined;
             }
             let value = heap.get_prop(*id, &key);
-            create_data_descriptor(value, true, true, true, heap)
+            let (writable, enumerable, configurable) = if matches!(value, Value::Builtin(_)) {
+                (true, false, true)
+            } else {
+                (true, true, true)
+            };
+            create_data_descriptor(value, writable, enumerable, configurable, heap)
         }
         Value::Array(id) => {
             if key == "length" {
@@ -224,8 +300,10 @@ pub fn get_own_property_descriptor(args: &[Value], heap: &mut Heap) -> Value {
             }
         }
         Value::Builtin(id) => {
-            if key == "length" {
-                let len = builtin_arity(*id);
+            if heap.builtin_prop_deleted(*id, &key) {
+                Value::Undefined
+            } else if key == "length" {
+                let len = builtins::length(*id);
                 create_data_descriptor(Value::Int(len), false, false, true, heap)
             } else if key == "name" {
                 let name = builtins::name(*id);
@@ -261,6 +339,16 @@ pub fn get_own_property_names(args: &[Value], heap: &mut Heap) -> Value {
             keys.push("length".to_string());
             keys
         }
+        Value::Builtin(id) => {
+            let mut keys = Vec::new();
+            if !heap.builtin_prop_deleted(*id, "length") {
+                keys.push("length".to_string());
+            }
+            if !heap.builtin_prop_deleted(*id, "name") {
+                keys.push("name".to_string());
+            }
+            keys
+        }
         _ => Vec::new(),
     };
     for name in names {
@@ -274,7 +362,7 @@ pub fn define_property(args: &[Value], heap: &mut Heap) -> Value {
         Some(value) => value.clone(),
         None => return Value::Undefined,
     };
-    let key = args.get(1).map(to_prop_key).unwrap_or_default();
+    let key = args.get(1).map(|v| to_prop_key_with_heap(v, heap)).unwrap_or_default();
     let descriptor = args.get(2).cloned().unwrap_or(Value::Undefined);
     let descriptor_value = match descriptor {
         Value::Object(descriptor_id) => {
@@ -301,9 +389,105 @@ pub fn define_property(args: &[Value], heap: &mut Heap) -> Value {
     target
 }
 
+pub fn define_properties(args: &[Value], heap: &mut Heap) -> Value {
+    let target = match args.first() {
+        Some(value) => value.clone(),
+        None => return Value::Undefined,
+    };
+    let props = match args.get(1) {
+        Some(Value::Object(id)) => heap.object_keys(*id),
+        _ => return target,
+    };
+    for key in props {
+        let descriptor = match args.get(1) {
+            Some(Value::Object(id)) => heap.get_prop(*id, &key),
+            _ => Value::Undefined,
+        };
+        let descriptor_val = match &descriptor {
+            Value::Object(desc_id) if heap.object_has_own_property(*desc_id, "value") => {
+                heap.get_prop(*desc_id, "value")
+            }
+            Value::Object(desc_id) if heap.object_has_own_property(*desc_id, "get") => {
+                heap.get_prop(*desc_id, "get")
+            }
+            _ => Value::Undefined,
+        };
+        match &target {
+            Value::Object(id) => heap.set_prop(*id, &key, descriptor_val),
+            Value::Array(id) => heap.set_array_prop(*id, &key, descriptor_val),
+            _ => {}
+        }
+    }
+    target
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime::Heap;
+
+    #[test]
+    fn from_entries_basic() {
+        let mut heap = Heap::new();
+        let entries_id = heap.alloc_array();
+        let pair1 = heap.alloc_array();
+        heap.array_push(pair1, Value::String("a".to_string()));
+        heap.array_push(pair1, Value::Int(1));
+        let pair2 = heap.alloc_array();
+        heap.array_push(pair2, Value::String("b".to_string()));
+        heap.array_push(pair2, Value::Int(2));
+        heap.array_push(entries_id, Value::Array(pair1));
+        heap.array_push(entries_id, Value::Array(pair2));
+        let result = from_entries(&[Value::Array(entries_id)], &mut heap);
+        if let Value::Object(obj_id) = result {
+            assert_eq!(heap.get_prop(obj_id, "a"), Value::Int(1));
+            assert_eq!(heap.get_prop(obj_id, "b"), Value::Int(2));
+        } else {
+            panic!("expected Object");
+        }
+    }
+
+    #[test]
+    fn property_is_enumerable_returns_false_for_builtin_name_and_length() {
+        let mut heap = Heap::new();
+        let map_id = crate::runtime::builtins::resolve("Array", "map").expect("map");
+        assert_eq!(
+            property_is_enumerable(
+                &[Value::Builtin(map_id), Value::String("name".to_string())],
+                &mut heap,
+            ),
+            Value::Bool(false)
+        );
+        assert_eq!(
+            property_is_enumerable(
+                &[Value::Builtin(map_id), Value::String("length".to_string())],
+                &mut heap,
+            ),
+            Value::Bool(false)
+        );
+    }
+
+    #[test]
+    fn get_own_property_descriptor_for_escape_builtin_length() {
+        let mut heap = Heap::new();
+        let escape_id = crate::runtime::builtins::resolve("Global", "escape").expect("escape");
+        let descriptor = get_own_property_descriptor(
+            &[Value::Builtin(escape_id), Value::String("length".to_string())],
+            &mut heap,
+        );
+        let descriptor_id = match descriptor {
+            Value::Object(id) => id,
+            other => panic!("expected descriptor object, got {:?}", other),
+        };
+        assert_eq!(
+            heap.get_prop(descriptor_id, "value"),
+            Value::Int(1),
+            "escape.length must be 1"
+        );
+        assert_eq!(heap.get_prop(descriptor_id, "enumerable"), Value::Bool(false));
+        assert_eq!(heap.get_prop(descriptor_id, "writable"), Value::Bool(false));
+        assert_eq!(heap.get_prop(descriptor_id, "configurable"), Value::Bool(true));
+    }
 
     #[test]
     fn get_own_property_descriptor_for_builtin_method() {

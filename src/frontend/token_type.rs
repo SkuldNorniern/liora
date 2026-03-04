@@ -58,6 +58,7 @@ pub enum TokenType {
     True,
     False,
     Number,
+    BigInt,
     String,
     RegExpLiteral { pattern: String, flags: String },
     TemplateLiteral,
@@ -172,6 +173,7 @@ impl TokenType {
                 | TokenType::True
                 | TokenType::False
                 | TokenType::Number
+                | TokenType::BigInt
                 | TokenType::String
                 | TokenType::RegExpLiteral { .. }
                 | TokenType::TemplateLiteral
@@ -305,6 +307,7 @@ impl std::fmt::Display for TokenType {
             TokenType::Function => write!(f, "function"),
             TokenType::Return => write!(f, "return"),
             TokenType::Number => write!(f, "number"),
+            TokenType::BigInt => write!(f, "bigint"),
             TokenType::Identifier => write!(f, "identifier"),
             TokenType::Plus => write!(f, "+"),
             TokenType::LeftParen => write!(f, "("),

@@ -82,6 +82,12 @@ pub fn parse_float(args: &[Value], _heap: &mut Heap) -> Value {
     number_to_value(n)
 }
 
+pub fn is_integer(args: &[Value], _heap: &mut Heap) -> Value {
+    let n = args.first().map(to_number).unwrap_or(f64::NAN);
+    let ok = n.is_finite() && n.fract() == 0.0;
+    Value::Bool(ok)
+}
+
 pub fn is_safe_integer(args: &[Value], _heap: &mut Heap) -> Value {
     let n = args.first().map(to_number).unwrap_or(f64::NAN);
     let ok =
@@ -101,6 +107,36 @@ pub fn primitive_value_of(args: &[Value], _heap: &mut Heap) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn is_integer_returns_true_for_integers() {
+        let mut heap = Heap::new();
+        assert_eq!(
+            is_integer(&[Value::Int(42)], &mut heap),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            is_integer(&[Value::Number(3.0)], &mut heap),
+            Value::Bool(true)
+        );
+    }
+
+    #[test]
+    fn is_integer_returns_false_for_non_integers() {
+        let mut heap = Heap::new();
+        assert_eq!(
+            is_integer(&[Value::Number(3.14)], &mut heap),
+            Value::Bool(false)
+        );
+        assert_eq!(
+            is_integer(&[Value::Number(f64::NAN)], &mut heap),
+            Value::Bool(false)
+        );
+        assert_eq!(
+            is_integer(&[Value::Number(f64::INFINITY)], &mut heap),
+            Value::Bool(false)
+        );
+    }
 
     #[test]
     fn is_nan_returns_true_for_nan() {

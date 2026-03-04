@@ -51,31 +51,47 @@ pub fn data_view(
     args: &[Value],
     ctx: &mut super::BuiltinContext,
 ) -> Result<Value, super::BuiltinError> {
-    let _ = (args, ctx);
-    Err(super::BuiltinError::Throw(Value::String(
-        "DataView is not implemented".to_string(),
-    )))
+    let heap = &mut ctx.heap;
+    let buffer = args.first().cloned().unwrap_or(Value::Undefined);
+    let byte_offset = args.get(1).map(|v| v.to_i64().max(0) as usize).unwrap_or(0);
+    let buffer_len = match &buffer {
+        Value::Object(id) => heap.get_prop(*id, "byteLength").to_i64().max(0) as usize,
+        Value::Array(id) => heap.array_len(*id),
+        _ => 0,
+    };
+    let byte_length = args.get(2).map(|v| v.to_i64().max(0) as usize).unwrap_or(
+        buffer_len.saturating_sub(byte_offset),
+    );
+    let id = heap.alloc_object();
+    heap.set_prop(id, "buffer", buffer);
+    heap.set_prop(id, "byteOffset", Value::Int(byte_offset as i32));
+    heap.set_prop(id, "byteLength", Value::Int(byte_length as i32));
+    Ok(Value::Object(id))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::Heap;
+    use crate::runtime::{Heap, Value};
 
     #[test]
-    fn data_view_throws_not_implemented() {
+    fn data_view_returns_object() {
         let mut heap = Heap::new();
-        let mut dynamic_chunks = Vec::new();
-        let mut ctx = super::super::BuiltinContext {
-            heap: &mut heap,
-            dynamic_chunks: &mut dynamic_chunks,
+        let buf = array_buffer(&[], &mut heap);
+        let id = {
+            let mut dynamic_chunks = Vec::new();
+            let mut ctx = super::super::BuiltinContext {
+                heap: &mut heap,
+                dynamic_chunks: &mut dynamic_chunks,
+            };
+            match data_view(&[buf], &mut ctx) {
+                Ok(Value::Object(id)) => id,
+                _ => panic!("expected Object"),
+            }
         };
-        let r = data_view(&[], &mut ctx);
-        assert!(r.is_err());
-        if let Err(super::super::BuiltinError::Throw(Value::String(s))) = r {
-            assert!(s.contains("DataView"));
-        } else {
-            panic!("expected Throw with string");
-        }
+        let byte_offset = heap.get_prop(id, "byteOffset");
+        let byte_length = heap.get_prop(id, "byteLength");
+        assert!(matches!(byte_offset, Value::Int(0)));
+        assert!(matches!(byte_length, Value::Int(_)));
     }
 }

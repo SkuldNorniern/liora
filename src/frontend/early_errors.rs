@@ -435,6 +435,7 @@ fn check_statement(
             }
         }
         Statement::Expression(_) => {}
+        Statement::Empty(_) => {}
         Statement::Throw(_) => {}
         Statement::Try(t) => {
             check_statement(&t.body, scope, ctx, errors);

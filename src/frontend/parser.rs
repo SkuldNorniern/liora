@@ -297,6 +297,13 @@ impl Parser {
             TokenType::Try => self.parse_try(),
             TokenType::Switch => self.parse_switch(),
             TokenType::LeftBrace => self.parse_block(),
+            TokenType::Semicolon => {
+                let span = self.expect(TokenType::Semicolon)?.span;
+                Ok(Statement::Empty(crate::frontend::ast::EmptyStmt {
+                    id: self.next_id(),
+                    span,
+                }))
+            }
             _ => self.parse_expression_statement(),
         }
     }
@@ -1216,6 +1223,9 @@ impl Parser {
             Expression::ObjectLiteral(obj) => {
                 let mut props = Vec::new();
                 for prop in &obj.properties {
+                    let ObjectPropertyOrSpread::Property(prop) = prop else {
+                        continue;
+                    };
                     let key = match &prop.key {
                         ObjectPropertyKey::Static(k) => k.clone(),
                         ObjectPropertyKey::Computed(_) => return None,
@@ -1274,9 +1284,12 @@ impl Parser {
                 let mut elems = Vec::new();
                 for elem in &arr.elements {
                     let (binding, default_init) = match elem {
-                        None => (None, None),
-                        Some(Expression::Identifier(ident)) => (Some(ident.name.clone()), None),
-                        Some(Expression::Assign(assign)) => {
+                        ArrayElement::Hole => (None, None),
+                        ArrayElement::Spread(_) => return None,
+                        ArrayElement::Expr(Expression::Identifier(ident)) => {
+                            (Some(ident.name.clone()), None)
+                        }
+                        ArrayElement::Expr(Expression::Assign(assign)) => {
                             if let Expression::Identifier(ident) = assign.left.as_ref() {
                                 let mut default_init = *assign.right.clone();
                                 Self::assign_default_initializer_name(
@@ -1288,7 +1301,7 @@ impl Parser {
                                 return None;
                             }
                         }
-                        Some(_) => return None,
+                        ArrayElement::Expr(_) => return None,
                     };
                     elems.push(ArrayPatternElem {
                         binding,
@@ -1851,16 +1864,7 @@ impl Parser {
                         Some(TokenType::LeftParen)
                     ) {
                         self.advance();
-                        let mut args = Vec::new();
-                        while !matches!(
-                            self.current().map(|t| &t.token_type),
-                            Some(TokenType::RightParen) | Some(TokenType::Eof) | None
-                        ) {
-                            args.push(self.parse_expression_prec(1)?);
-                            if !self.optional(TokenType::Comma) {
-                                break;
-                            }
-                        }
+                        let args = self.parse_call_args()?;
                         let end_tok = self.expect(TokenType::RightParen)?;
                         (args, callee.span().merge(end_tok.span))
                     } else {
@@ -1901,6 +1905,24 @@ impl Parser {
         self.parse_postfix_continued(expr)
     }
 
+    fn parse_call_args(&mut self) -> Result<Vec<CallArg>, ParseError> {
+        let mut args = Vec::new();
+        while !matches!(
+            self.current().map(|t| &t.token_type),
+            Some(TokenType::RightParen) | Some(TokenType::Eof) | None
+        ) {
+            if self.optional(TokenType::Spread) {
+                args.push(CallArg::Spread(self.parse_expression_prec(1)?));
+            } else {
+                args.push(CallArg::Expr(self.parse_expression_prec(1)?));
+            }
+            if !self.optional(TokenType::Comma) {
+                break;
+            }
+        }
+        Ok(args)
+    }
+
     fn parse_postfix_continued(&mut self, mut expr: Expression) -> Result<Expression, ParseError> {
         loop {
             if matches!(
@@ -1909,16 +1931,7 @@ impl Parser {
             ) {
                 let start_span = expr.span();
                 self.advance();
-                let mut args = Vec::new();
-                while !matches!(
-                    self.current().map(|t| &t.token_type),
-                    Some(TokenType::RightParen) | Some(TokenType::Eof) | None
-                ) {
-                    args.push(self.parse_expression_prec(1)?);
-                    if !self.optional(TokenType::Comma) {
-                        break;
-                    }
-                }
+                let args = self.parse_call_args()?;
                 let end_token = self.expect(TokenType::RightParen)?;
                 let span = start_span.merge(end_token.span);
                 expr = Expression::Call(CallExpr {
@@ -2013,6 +2026,18 @@ impl Parser {
                         id: self.next_id(),
                         span,
                         value: val,
+                    }),
+                    span,
+                )
+            }
+            TokenType::BigInt => {
+                let span = token.span;
+                self.advance();
+                (
+                    Expression::Literal(LiteralExpr {
+                        id: self.next_id(),
+                        span,
+                        value: LiteralValue::BigInt(token.lexeme.clone()),
                     }),
                     span,
                 )
@@ -2167,6 +2192,15 @@ impl Parser {
                         })?
                         .clone();
 
+                    if property_token.token_type == TokenType::Spread {
+                        self.advance();
+                        let spread_expr = self.parse_assignment_expression_allow_in()?;
+                        properties.push(ObjectPropertyOrSpread::Spread(spread_expr));
+                        if !self.optional(TokenType::Comma) {
+                            break;
+                        }
+                        continue;
+                    }
                     if property_token.token_type == TokenType::LeftBracket {
                         let key_span = property_token.span;
                         self.advance();
@@ -2183,10 +2217,10 @@ impl Parser {
                             self.parse_assignment_expression_allow_in()?
                         };
 
-                        properties.push(ObjectProperty {
+                        properties.push(ObjectPropertyOrSpread::Property(ObjectProperty {
                             key: ObjectPropertyKey::Computed(computed_key),
                             value,
-                        });
+                        }));
                     } else {
                         let key_span = property_token.span;
                         let (key, is_identifier_key) = match property_token.token_type {
@@ -2248,10 +2282,10 @@ impl Parser {
                             });
                         };
 
-                        properties.push(ObjectProperty {
+                        properties.push(ObjectPropertyOrSpread::Property(ObjectProperty {
                             key: ObjectPropertyKey::Static(key),
                             value,
-                        });
+                        }));
                     }
                     if !self.optional(TokenType::Comma) {
                         break;
@@ -2280,10 +2314,15 @@ impl Parser {
                         self.current().map(|t| &t.token_type),
                         Some(TokenType::Comma)
                     ) {
-                        elements.push(None);
+                        elements.push(ArrayElement::Hole);
                         self.advance();
+                    } else if self.optional(TokenType::Spread) {
+                        elements.push(ArrayElement::Spread(self.parse_expression_prec(1)?));
+                        if !self.optional(TokenType::Comma) {
+                            break;
+                        }
                     } else {
-                        elements.push(Some(self.parse_expression_prec(1)?));
+                        elements.push(ArrayElement::Expr(self.parse_expression_prec(1)?));
                         if !self.optional(TokenType::Comma) {
                             break;
                         }
@@ -3396,6 +3435,17 @@ mod tests {
         let _ = parse_ok("function f() { return; }");
     }
     #[test]
+    fn parse_empty_statement() {
+        let script = parse_ok("function f() { ; }");
+        if let Statement::FunctionDecl(f) = &script.body[0] {
+            if let Statement::Block(b) = &*f.body {
+                assert!(matches!(&b.body[0], Statement::Empty(_)));
+                return;
+            }
+        }
+        panic!("expected empty statement in block");
+    }
+    #[test]
     fn parse_try_catch() {
         let script = parse_ok("function f() { try { throw 1; } catch (e) { return e; } }");
         if let Statement::FunctionDecl(f) = &script.body[0] {
@@ -3867,14 +3917,16 @@ mod tests {
         let script = parse_ok("({ [key]: 1, ['y']: 2 });");
         if let Statement::Expression(expr_stmt) = &script.body[0] {
             if let Expression::ObjectLiteral(object_literal) = expr_stmt.expression.as_ref() {
-                assert!(matches!(
-                    object_literal.properties[0].key,
-                    ObjectPropertyKey::Computed(_)
-                ));
-                assert!(matches!(
-                    object_literal.properties[1].key,
-                    ObjectPropertyKey::Computed(_)
-                ));
+                if let ObjectPropertyOrSpread::Property(p0) = &object_literal.properties[0] {
+                    assert!(matches!(&p0.key, ObjectPropertyKey::Computed(_)));
+                } else {
+                    panic!("expected property");
+                }
+                if let ObjectPropertyOrSpread::Property(p1) = &object_literal.properties[1] {
+                    assert!(matches!(&p1.key, ObjectPropertyKey::Computed(_)));
+                } else {
+                    panic!("expected property");
+                }
                 return;
             }
         }
@@ -3887,18 +3939,21 @@ mod tests {
         if let Statement::Expression(expr_stmt) = &script.body[0] {
             if let Expression::ObjectLiteral(object_literal) = expr_stmt.expression.as_ref() {
                 assert_eq!(object_literal.properties.len(), 3);
-                assert!(matches!(
-                    &object_literal.properties[0].key,
-                    ObjectPropertyKey::Static(s) if s == "a"
-                ));
-                assert!(matches!(
-                    &object_literal.properties[1].key,
-                    ObjectPropertyKey::Computed(_)
-                ));
-                assert!(matches!(
-                    &object_literal.properties[2].key,
-                    ObjectPropertyKey::Static(s) if s == "b"
-                ));
+                if let ObjectPropertyOrSpread::Property(p0) = &object_literal.properties[0] {
+                    assert!(matches!(&p0.key, ObjectPropertyKey::Static(s) if s == "a"));
+                } else {
+                    panic!("expected property");
+                }
+                if let ObjectPropertyOrSpread::Property(p1) = &object_literal.properties[1] {
+                    assert!(matches!(&p1.key, ObjectPropertyKey::Computed(_)));
+                } else {
+                    panic!("expected property");
+                }
+                if let ObjectPropertyOrSpread::Property(p2) = &object_literal.properties[2] {
+                    assert!(matches!(&p2.key, ObjectPropertyKey::Static(s) if s == "b"));
+                } else {
+                    panic!("expected property");
+                }
                 return;
             }
         }
