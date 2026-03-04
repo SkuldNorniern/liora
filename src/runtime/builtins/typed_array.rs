@@ -80,11 +80,7 @@ mod tests {
         let mut heap = Heap::new();
         let buf = array_buffer(&[], &mut heap);
         let id = {
-            let mut dynamic_chunks = Vec::new();
-            let mut ctx = super::super::BuiltinContext {
-                heap: &mut heap,
-                dynamic_chunks: &mut dynamic_chunks,
-            };
+            let mut ctx = super::super::BuiltinContext { heap: &mut heap };
             match data_view(&[buf], &mut ctx) {
                 Ok(Value::Object(id)) => id,
                 _ => panic!("expected Object"),

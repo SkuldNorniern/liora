@@ -8,6 +8,9 @@ mod boolean;
 mod date;
 mod dollar262;
 mod encode;
+mod generator;
+mod iterator;
+mod promise;
 mod error;
 mod eval;
 mod function_ctor;
@@ -26,13 +29,11 @@ mod symbol;
 mod timeout;
 mod typed_array;
 
-use crate::ir::bytecode::BytecodeChunk;
 use crate::runtime::{Heap, Value};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 pub struct BuiltinContext<'a> {
     pub heap: &'a mut Heap,
-    pub dynamic_chunks: &'a mut Vec<BytecodeChunk>,
 }
 
 #[derive(Debug)]
@@ -43,6 +44,10 @@ pub enum BuiltinError {
         this_arg: Value,
         args: Vec<Value>,
         new_object: Option<usize>,
+    },
+    ResumeGenerator {
+        gen_id: usize,
+        sent_value: Value,
     },
 }
 
@@ -71,7 +76,9 @@ pub(crate) fn to_number(v: &Value) -> f64 {
         | Value::DynamicFunction(_)
         | Value::Builtin(_)
         | Value::BoundBuiltin(_, _, _)
-        | Value::BoundFunction(_, _, _) => f64::NAN,
+        | Value::BoundFunction(_, _, _)
+        | Value::Generator(_)
+        | Value::Promise(_) => f64::NAN,
     }
 }
 
@@ -93,7 +100,9 @@ pub(crate) fn is_truthy(v: &Value) -> bool {
         | Value::DynamicFunction(_)
         | Value::Builtin(_)
         | Value::BoundBuiltin(_, _, _)
-        | Value::BoundFunction(_, _, _) => true,
+        | Value::BoundFunction(_, _, _)
+        | Value::Generator(_)
+        | Value::Promise(_) => true,
     }
 }
 
@@ -115,6 +124,8 @@ pub(crate) fn to_prop_key(v: &Value) -> String {
         | Value::Builtin(_)
         | Value::BoundBuiltin(_, _, _)
         | Value::BoundFunction(_, _, _) => "function".to_string(),
+        Value::Generator(_) => "[object Generator]".to_string(),
+        Value::Promise(_) => "[object Promise]".to_string(),
     }
 }
 
@@ -155,6 +166,8 @@ pub(crate) fn strict_eq(a: &Value, b: &Value) -> bool {
                 && strict_eq(b1, b2)
                 && c1.iter().zip(c2.iter()).all(|(x, y)| strict_eq(x, y))
         }
+        (Value::Generator(x), Value::Generator(y)) => x == y,
+        (Value::Promise(x), Value::Promise(y)) => x == y,
         _ => false,
     }
 }
@@ -1163,6 +1176,81 @@ const BUILTINS: &[BuiltinDef] = &[
         name: "bind",
         entry: BuiltinEntry::Throwing(function_proto::function_bind),
     },
+    BuiltinDef {
+        category: "Generator",
+        name: "next",
+        entry: BuiltinEntry::Throwing(generator::next),
+    },
+    BuiltinDef {
+        category: "Generator",
+        name: "return",
+        entry: BuiltinEntry::Throwing(generator::generator_return),
+    },
+    BuiltinDef {
+        category: "Generator",
+        name: "throw",
+        entry: BuiltinEntry::Throwing(generator::generator_throw),
+    },
+    BuiltinDef {
+        category: "Iterator",
+        name: "getIterator",
+        entry: BuiltinEntry::Throwing(iterator::get_iterator),
+    },
+    BuiltinDef {
+        category: "Iterator",
+        name: "arrayNext",
+        entry: BuiltinEntry::Throwing(iterator::array_next),
+    },
+    BuiltinDef {
+        category: "Iterator",
+        name: "stringNext",
+        entry: BuiltinEntry::Throwing(iterator::string_next),
+    },
+    BuiltinDef {
+        category: "Promise",
+        name: "constructor",
+        entry: BuiltinEntry::Throwing(promise::promise_constructor),
+    },
+    BuiltinDef {
+        category: "Promise",
+        name: "resolve_static",
+        entry: BuiltinEntry::Throwing(promise::promise_resolve_static),
+    },
+    BuiltinDef {
+        category: "Promise",
+        name: "reject_static",
+        entry: BuiltinEntry::Throwing(promise::promise_reject_static),
+    },
+    BuiltinDef {
+        category: "Promise",
+        name: "resolve_fn",
+        entry: BuiltinEntry::Throwing(promise::resolve_fn),
+    },
+    BuiltinDef {
+        category: "Promise",
+        name: "reject_fn",
+        entry: BuiltinEntry::Throwing(promise::reject_fn),
+    },
+    BuiltinDef {
+        category: "Promise",
+        name: "then",
+        entry: BuiltinEntry::Throwing(promise::promise_then),
+    },
+    BuiltinDef {
+        category: "Promise",
+        name: "catch",
+        entry: BuiltinEntry::Throwing(promise::promise_catch),
+    },
+    BuiltinDef {
+        category: "Promise",
+        name: "finally",
+        entry: BuiltinEntry::Throwing(promise::promise_finally),
+    },
+    BuiltinDef {
+        category: "Promise",
+        name: "all",
+        entry: BuiltinEntry::Throwing(promise::promise_all),
+    },
 ];
 
 pub const MAX_BUILTIN_ID: u8 = (BUILTINS.len() - 1) as u8;
@@ -1256,11 +1344,7 @@ mod tests {
     #[test]
     fn dispatch_regexp_escape() {
         let mut heap = Heap::new();
-        let mut dynamic_chunks = Vec::new();
-        let mut ctx = BuiltinContext {
-            heap: &mut heap,
-            dynamic_chunks: &mut dynamic_chunks,
-        };
+        let mut ctx = BuiltinContext { heap: &mut heap };
         let args = [crate::runtime::Value::String(".".to_string())];
         let id = resolve("RegExp", "escape").expect("RegExp.escape");
         let r = dispatch(id, &args, &mut ctx);

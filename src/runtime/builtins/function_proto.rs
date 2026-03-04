@@ -153,11 +153,7 @@ mod tests {
         let arr_id = heap.alloc_array();
         heap.array_push(arr_id, Value::String("a".to_string()));
         heap.array_push(arr_id, Value::String("b".to_string()));
-        let mut dynamic_chunks = Vec::new();
-        let mut ctx = BuiltinContext {
-            heap: &mut heap,
-            dynamic_chunks: &mut dynamic_chunks,
-        };
+        let mut ctx = BuiltinContext { heap: &mut heap };
         let join_builtin = Value::Builtin(join_id);
         let call_builtin = Value::Builtin(call_id);
         let arr = Value::Array(arr_id);

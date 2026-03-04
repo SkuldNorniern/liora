@@ -19,11 +19,7 @@ mod tests {
     #[test]
     fn timeout_is_noop() {
         let mut heap = Heap::new();
-        let mut dynamic_chunks = Vec::new();
-        let mut ctx = BuiltinContext {
-            heap: &mut heap,
-            dynamic_chunks: &mut dynamic_chunks,
-        };
+        let mut ctx = BuiltinContext { heap: &mut heap };
         let r = timeout(&[], &mut ctx);
         assert!(matches!(r, Ok(Value::Undefined)));
     }

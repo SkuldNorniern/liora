@@ -45,11 +45,7 @@ mod tests {
     #[test]
     fn gc_is_noop() {
         let mut heap = Heap::new();
-        let mut dynamic_chunks = Vec::new();
-        let mut ctx = BuiltinContext {
-            heap: &mut heap,
-            dynamic_chunks: &mut dynamic_chunks,
-        };
+        let mut ctx = BuiltinContext { heap: &mut heap };
         let args = [];
         let result = gc(&args, &mut ctx);
         assert!(result.is_ok());
@@ -59,11 +55,7 @@ mod tests {
     #[test]
     fn eval_script_delegates_to_eval() {
         let mut heap = Heap::new();
-        let mut dynamic_chunks = Vec::new();
-        let mut ctx = BuiltinContext {
-            heap: &mut heap,
-            dynamic_chunks: &mut dynamic_chunks,
-        };
+        let mut ctx = BuiltinContext { heap: &mut heap };
         let args = [Value::String("return 1 + 2".to_string())];
         let result = eval_script(&args, &mut ctx);
         assert!(result.is_ok());

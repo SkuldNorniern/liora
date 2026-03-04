@@ -226,6 +226,8 @@ pub fn to_string(args: &[Value], heap: &mut Heap) -> Value {
         Some(Value::Symbol(_)) => "Symbol",
         Some(Value::Null) => "Null",
         Some(Value::Undefined) => "Undefined",
+        Some(Value::Generator(_)) => "Generator",
+        Some(Value::Promise(_)) => "Promise",
         None => "Object",
     };
     Value::String(format!("[object {}]", tag))

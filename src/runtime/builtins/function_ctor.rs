@@ -57,8 +57,9 @@ pub fn function_constructor(
             Ok(Completion::Return(v)) => {
                 if let Value::Function(inner_idx) = v {
                     if let Some(inner_chunk) = program.chunks.get(inner_idx) {
-                        ctx.dynamic_chunks.push(inner_chunk.clone());
-                        return Ok(Value::DynamicFunction(ctx.dynamic_chunks.len() - 1));
+                        ctx.heap.dynamic_chunks.push(inner_chunk.clone());
+                        ctx.heap.dynamic_captures.push(Vec::new());
+                        return Ok(Value::DynamicFunction(ctx.heap.dynamic_chunks.len() - 1));
                     }
                 }
                 Ok(v)
@@ -125,8 +126,9 @@ pub fn function_constructor(
         Ok(Completion::Return(v)) => {
             if let Value::Function(inner_idx) = v {
                 if let Some(inner_chunk) = program.chunks.get(inner_idx) {
-                    ctx.dynamic_chunks.push(inner_chunk.clone());
-                    return Ok(Value::DynamicFunction(ctx.dynamic_chunks.len() - 1));
+                    ctx.heap.dynamic_chunks.push(inner_chunk.clone());
+                    ctx.heap.dynamic_captures.push(Vec::new());
+                    return Ok(Value::DynamicFunction(ctx.heap.dynamic_chunks.len() - 1));
                 }
             }
             Ok(v)

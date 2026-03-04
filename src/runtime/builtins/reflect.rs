@@ -141,12 +141,7 @@ pub fn reflect_construct(args: &[Value], ctx: &mut BuiltinContext) -> Result<Val
             let ctor = ctx.heap.get_prop(*obj_id, "__call__");
             match ctor {
                 Value::Builtin(builtin_id) => {
-                    let mut dynamic_chunks = vec![];
-                    let mut inner_ctx = BuiltinContext {
-                        heap: ctx.heap,
-                        dynamic_chunks: &mut dynamic_chunks,
-                    };
-                    match super::dispatch(builtin_id, &construct_args, &mut inner_ctx) {
+                    match super::dispatch(builtin_id, &construct_args, ctx) {
                         Ok(result) => {
                             let use_result = matches!(
                                 result,
@@ -158,6 +153,11 @@ pub fn reflect_construct(args: &[Value], ctx: &mut BuiltinContext) -> Result<Val
                         Err(BuiltinError::Invoke { .. }) => {
                             Err(BuiltinError::Throw(Value::String(
                                 "Reflect.construct: constructor returned Invoke".to_string(),
+                            )))
+                        }
+                        Err(BuiltinError::ResumeGenerator { .. }) => {
+                            Err(BuiltinError::Throw(Value::String(
+                                "Reflect.construct: cannot construct generator".to_string(),
                             )))
                         }
                     }
@@ -183,11 +183,7 @@ pub fn reflect_construct(args: &[Value], ctx: &mut BuiltinContext) -> Result<Val
             new_object: Some(new_object),
         }),
         Value::Builtin(builtin_id) => {
-            let mut inner_ctx = BuiltinContext {
-                heap: ctx.heap,
-                dynamic_chunks: &mut vec![],
-            };
-            match super::dispatch(*builtin_id, &construct_args, &mut inner_ctx) {
+            match super::dispatch(*builtin_id, &construct_args, ctx) {
                 Ok(result) => {
                     let use_result = matches!(result, Value::Object(_) | Value::Date(_));
                     Ok(if use_result { result } else { new_obj_value })
@@ -195,6 +191,9 @@ pub fn reflect_construct(args: &[Value], ctx: &mut BuiltinContext) -> Result<Val
                 Err(BuiltinError::Throw(v)) => Err(BuiltinError::Throw(v)),
                 Err(BuiltinError::Invoke { .. }) => Err(BuiltinError::Throw(Value::String(
                     "Reflect.construct: nested construct".to_string(),
+                ))),
+                Err(BuiltinError::ResumeGenerator { .. }) => Err(BuiltinError::Throw(Value::String(
+                    "Reflect.construct: cannot construct generator".to_string(),
                 ))),
             }
         }
@@ -215,11 +214,7 @@ mod tests {
     #[test]
     fn reflect_apply_requires_three_args() {
         let mut heap = Heap::new();
-        let mut dynamic_chunks = Vec::new();
-        let mut ctx = BuiltinContext {
-            heap: &mut heap,
-            dynamic_chunks: &mut dynamic_chunks,
-        };
+        let mut ctx = BuiltinContext { heap: &mut heap };
         let r = reflect_apply(&[], &mut ctx);
         assert!(r.is_err());
         assert!(matches!(r, Err(BuiltinError::Throw(_))));
@@ -236,11 +231,7 @@ mod tests {
         heap.array_push(args_array, Value::Int(1));
         heap.array_push(args_array, Value::Int(2));
         let args = [target, this_arg, Value::Array(args_array)];
-        let mut dynamic_chunks = Vec::new();
-        let mut ctx = BuiltinContext {
-            heap: &mut heap,
-            dynamic_chunks: &mut dynamic_chunks,
-        };
+        let mut ctx = BuiltinContext { heap: &mut heap };
         let r = reflect_apply(&args, &mut ctx);
         assert!(
             r.is_err(),
@@ -267,11 +258,7 @@ mod tests {
         let mut heap = Heap::new();
         let obj_id = heap.alloc_object();
         heap.set_prop(obj_id, "x", Value::Int(42));
-        let mut dynamic_chunks = Vec::new();
-        let mut ctx = BuiltinContext {
-            heap: &mut heap,
-            dynamic_chunks: &mut dynamic_chunks,
-        };
+        let mut ctx = BuiltinContext { heap: &mut heap };
         let args = [Value::Object(obj_id), Value::String("x".to_string())];
         let r = reflect_get(&args, &mut ctx);
         assert!(r.is_ok(), "reflect_get failed: {:?}", r);
@@ -282,11 +269,7 @@ mod tests {
     #[test]
     fn reflect_construct_requires_two_args() {
         let mut heap = Heap::new();
-        let mut dynamic_chunks = Vec::new();
-        let mut ctx = BuiltinContext {
-            heap: &mut heap,
-            dynamic_chunks: &mut dynamic_chunks,
-        };
+        let mut ctx = BuiltinContext { heap: &mut heap };
         let r = reflect_construct(&[], &mut ctx);
         assert!(r.is_err());
         assert!(matches!(r, Err(BuiltinError::Throw(_))));
@@ -298,11 +281,7 @@ mod tests {
         let error_ctor = heap.get_global("Error");
         let args_array = heap.alloc_array();
         heap.array_push(args_array, Value::String("test message".to_string()));
-        let mut dynamic_chunks = Vec::new();
-        let mut ctx = BuiltinContext {
-            heap: &mut heap,
-            dynamic_chunks: &mut dynamic_chunks,
-        };
+        let mut ctx = BuiltinContext { heap: &mut heap };
         let args = [error_ctor, Value::Array(args_array)];
         let r = reflect_construct(&args, &mut ctx);
         assert!(r.is_ok(), "reflect_construct failed: {:?}", r);
