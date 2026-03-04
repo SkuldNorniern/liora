@@ -65,7 +65,11 @@ struct CheckContext {
 fn is_iteration(stmt: &Statement) -> bool {
     matches!(
         stmt,
-        Statement::For(_) | Statement::While(_) | Statement::ForIn(_) | Statement::ForOf(_)
+        Statement::For(_)
+            | Statement::While(_)
+            | Statement::DoWhile(_)
+            | Statement::ForIn(_)
+            | Statement::ForOf(_)
     )
 }
 
@@ -286,6 +290,17 @@ fn check_statement(
                 break_labels: ctx.break_labels.clone(),
             };
             check_statement(&w.body, scope, &iter_ctx, errors);
+        }
+        Statement::DoWhile(d) => {
+            let iter_ctx = CheckContext {
+                in_function: ctx.in_function,
+                in_iteration: true,
+                in_switch: ctx.in_switch,
+                strict: ctx.strict,
+                iter_labels: ctx.iter_labels.clone(),
+                break_labels: ctx.break_labels.clone(),
+            };
+            check_statement(&d.body, scope, &iter_ctx, errors);
         }
         Statement::For(f) => {
             if let Some(ref init) = f.init {

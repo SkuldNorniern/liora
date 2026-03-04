@@ -83,6 +83,12 @@ pub enum HirOp {
     StrictNotEq {
         span: Span,
     },
+    Eq {
+        span: Span,
+    },
+    NotEq {
+        span: Span,
+    },
     LeftShift {
         span: Span,
     },

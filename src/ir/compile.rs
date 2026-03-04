@@ -32,6 +32,8 @@ fn block_bytecode_size(block: &HirBlock, const_start: usize) -> usize {
             | HirOp::Gte { .. }
             | HirOp::StrictEq { .. }
             | HirOp::StrictNotEq { .. }
+            | HirOp::Eq { .. }
+            | HirOp::NotEq { .. }
             | HirOp::LeftShift { .. }
             | HirOp::RightShift { .. }
             | HirOp::UnsignedRightShift { .. }
@@ -159,6 +161,8 @@ pub fn hir_to_bytecode(func: &HirFunction) -> CompiledFunction {
                 HirOp::Gte { .. } => code.push(Opcode::Gte as u8),
                 HirOp::StrictEq { .. } => code.push(Opcode::StrictEq as u8),
                 HirOp::StrictNotEq { .. } => code.push(Opcode::StrictNotEq as u8),
+                HirOp::Eq { .. } => code.push(Opcode::Eq as u8),
+                HirOp::NotEq { .. } => code.push(Opcode::NotEq as u8),
                 HirOp::LeftShift { .. } => code.push(Opcode::LeftShift as u8),
                 HirOp::RightShift { .. } => code.push(Opcode::RightShift as u8),
                 HirOp::UnsignedRightShift { .. } => code.push(Opcode::UnsignedRightShift as u8),

@@ -18,6 +18,66 @@ pub(crate) fn is_nullish(v: &Value) -> bool {
 }
 
 #[inline(always)]
+pub(crate) fn loose_eq(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Null, Value::Undefined) | (Value::Undefined, Value::Null) => true,
+        (Value::Bool(x), other) | (other, Value::Bool(x)) => {
+            let n = if *x { 1.0 } else { 0.0 };
+            loose_eq(&Value::Number(n), other)
+        }
+        (Value::Number(x), Value::Number(y)) => {
+            if x.is_nan() || y.is_nan() {
+                false
+            } else {
+                x == y
+            }
+        }
+        (Value::Int(x), Value::Int(y)) => x == y,
+        (Value::Int(x), Value::Number(y)) | (Value::Number(y), Value::Int(x)) => {
+            if y.is_nan() {
+                false
+            } else {
+                (*x as f64) == *y
+            }
+        }
+        (Value::Number(x), Value::String(y)) | (Value::String(y), Value::Number(x)) => {
+            if x.is_nan() {
+                false
+            } else {
+                let yn: f64 = y.parse().unwrap_or(f64::NAN);
+                *x == yn
+            }
+        }
+        (Value::Int(x), Value::String(y)) | (Value::String(y), Value::Int(x)) => {
+            let yn: f64 = y.parse().unwrap_or(f64::NAN);
+            (*x as f64) == yn
+        }
+        (Value::String(x), Value::String(y)) => x == y,
+        (Value::Object(x), Value::Object(y)) => x == y,
+        (Value::Undefined, Value::Undefined) | (Value::Null, Value::Null) => true,
+        (Value::Symbol(x), Value::Symbol(y)) => x == y,
+        (Value::Symbol(_), _) | (_, Value::Symbol(_)) => false,
+        (Value::BigInt(x), Value::BigInt(y)) => x == y,
+        (Value::BigInt(_), _) | (_, Value::BigInt(_)) => false,
+        _ => {
+            let na = builtins::to_number(a);
+            let nb = builtins::to_number(b);
+            if na.is_nan() || nb.is_nan() {
+                if matches!(a, Value::Object(_) | Value::Array(_) | Value::Date(_))
+                    && matches!(b, Value::Object(_) | Value::Array(_) | Value::Date(_))
+                {
+                    a == b
+                } else {
+                    false
+                }
+            } else {
+                na == nb
+            }
+        }
+    }
+}
+
+#[inline(always)]
 pub(crate) fn strict_eq(a: &Value, b: &Value) -> bool {
     match (a, b) {
         (Value::Undefined, Value::Undefined) | (Value::Null, Value::Null) => true,

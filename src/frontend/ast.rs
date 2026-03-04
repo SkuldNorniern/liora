@@ -16,6 +16,7 @@ pub enum Statement {
     Labeled(LabeledStmt),
     If(IfStmt),
     While(WhileStmt),
+    DoWhile(DoWhileStmt),
     For(ForStmt),
     ForIn(ForInStmt),
     ForOf(ForOfStmt),
@@ -109,6 +110,14 @@ pub struct WhileStmt {
     pub span: Span,
     pub condition: Box<Expression>,
     pub body: Box<Statement>,
+}
+
+#[derive(Debug, Clone)]
+pub struct DoWhileStmt {
+    pub id: NodeId,
+    pub span: Span,
+    pub body: Box<Statement>,
+    pub condition: Box<Expression>,
 }
 
 #[derive(Debug, Clone)]
@@ -488,6 +497,7 @@ pub enum UnaryOp {
     BitwiseNot,
     Typeof,
     Delete,
+    Void,
 }
 
 #[derive(Debug, Clone)]
@@ -534,6 +544,7 @@ impl Statement {
             Statement::Labeled(s) => s.span,
             Statement::If(s) => s.span,
             Statement::While(s) => s.span,
+            Statement::DoWhile(s) => s.span,
             Statement::For(s) => s.span,
             Statement::Return(s) => s.span,
             Statement::Break(s) => s.span,

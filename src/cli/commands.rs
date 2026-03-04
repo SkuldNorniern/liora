@@ -75,6 +75,10 @@ fn print_stmt(idx: usize, stmt: &Statement, indent: usize) {
             println!("{}[{}] While cond: {}", pad, idx, format_expr(&s.condition));
             print_stmt(0, &s.body, indent + 1);
         }
+        Statement::DoWhile(s) => {
+            println!("{}[{}] DoWhile cond: {}", pad, idx, format_expr(&s.condition));
+            print_stmt(0, &s.body, indent + 1);
+        }
         Statement::For(s) => {
             println!("{}[{}] For", pad, idx);
             print_stmt(0, &s.body, indent + 1);

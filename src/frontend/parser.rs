@@ -290,6 +290,7 @@ impl Parser {
             TokenType::Continue => self.parse_continue(),
             TokenType::If => self.parse_if(),
             TokenType::While => self.parse_while(),
+            TokenType::Do => self.parse_do_while(),
             TokenType::For => self.parse_for(),
             TokenType::Var => self.parse_var_decl(),
             TokenType::Let => self.parse_let_decl(),
@@ -924,6 +925,28 @@ impl Parser {
             span,
             condition,
             body,
+        }))
+    }
+
+    fn parse_do_while(&mut self) -> Result<Statement, ParseError> {
+        let start_span = self.expect(TokenType::Do)?.span;
+        let id = self.next_id();
+
+        let body = Box::new(self.parse_statement()?);
+
+        self.expect(TokenType::While)?;
+        self.expect(TokenType::LeftParen)?;
+        let condition = Box::new(self.parse_expression()?);
+        let end_tok = self.expect(TokenType::RightParen)?;
+        self.optional(TokenType::Semicolon);
+
+        let span = start_span.merge(end_tok.span);
+
+        Ok(Statement::DoWhile(DoWhileStmt {
+            id,
+            span,
+            body,
+            condition,
         }))
     }
 
@@ -1824,6 +1847,10 @@ impl Parser {
                 TokenType::Delete => {
                     self.advance();
                     (UnaryOp::Delete, t.span)
+                }
+                TokenType::Void => {
+                    self.advance();
+                    (UnaryOp::Void, t.span)
                 }
                 TokenType::New => {
                     self.advance();

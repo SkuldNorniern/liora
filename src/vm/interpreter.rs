@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use super::calls::{execute_builtin, pop_args, read_i16, read_u16, read_u8, setup_callee_locals};
 use super::ops::{
     add_values, div_values, gt_values, gte_values, instanceof_check, is_nullish, is_truthy,
-    lt_values, lte_values, mod_values, mul_values, pow_values, strict_eq, sub_values,
+    loose_eq, lt_values, lte_values, mod_values, mul_values, pow_values, strict_eq, sub_values,
     value_to_prop_key, value_to_prop_key_with_heap,
 };
 use super::props::{GetPropCache, resolve_get_prop};
@@ -608,6 +608,16 @@ pub fn interpret_program_with_heap_and_entry(
                     (Value::Int(a), Value::Int(b)) => a != b,
                     _ => !strict_eq(&lhs, &rhs),
                 }));
+            }
+            0x2a => {
+                let rhs = state.stack.pop().ok_or_else(underflow)?;
+                let lhs = state.stack.pop().ok_or_else(underflow)?;
+                state.stack.push(Value::Bool(loose_eq(&lhs, &rhs)));
+            }
+            0x2b => {
+                let rhs = state.stack.pop().ok_or_else(underflow)?;
+                let lhs = state.stack.pop().ok_or_else(underflow)?;
+                state.stack.push(Value::Bool(!loose_eq(&lhs, &rhs)));
             }
             0x1d => {
                 let val = state.stack.pop().ok_or_else(underflow)?;

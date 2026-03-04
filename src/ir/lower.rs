@@ -150,6 +150,7 @@ fn collect_function_exprs_stmt(stmt: &Statement, out: &mut Vec<(NodeId, Function
             }
         }
         Statement::While(w) => collect_function_exprs_stmt(&w.body, out),
+        Statement::DoWhile(d) => collect_function_exprs_stmt(&d.body, out),
         Statement::For(f) => {
             if let Some(i) = &f.init {
                 collect_function_exprs_stmt(i, out);
@@ -368,6 +369,7 @@ pub fn script_to_hir(script: &Script) -> Result<Vec<HirFunction>, LowerError> {
             | Statement::Labeled(_)
             | Statement::If(_)
             | Statement::While(_)
+            | Statement::DoWhile(_)
             | Statement::For(_)
             | Statement::ForIn(_)
             | Statement::ForOf(_)
@@ -1146,7 +1148,11 @@ fn compile_statement(stmt: &Statement, ctx: &mut LowerCtx<'_>) -> Result<bool, L
         Statement::Labeled(l) => {
             let is_loop = matches!(
                 l.body.as_ref(),
-                Statement::For(_) | Statement::While(_) | Statement::ForIn(_) | Statement::ForOf(_)
+                Statement::For(_)
+                    | Statement::While(_)
+                    | Statement::DoWhile(_)
+                    | Statement::ForIn(_)
+                    | Statement::ForOf(_)
             );
             let is_switch = matches!(l.body.as_ref(), Statement::Switch(_));
             if is_loop || is_switch {
@@ -1517,6 +1523,77 @@ fn compile_statement(stmt: &Statement, ctx: &mut LowerCtx<'_>) -> Result<bool, L
                 }
             }
             ctx.blocks[loop_id as usize].terminator = HirTerminator::Branch {
+                cond: cond_slot,
+                then_block: body_id,
+                else_block: exit_id,
+            };
+
+            ctx.current_block = exit_id as usize;
+        }
+        Statement::DoWhile(d) => {
+            let cond_slot = ctx.next_slot;
+            ctx.next_slot += 1;
+
+            let body_id = ctx.blocks.len() as HirBlockId;
+            ctx.blocks.push(HirBlock {
+                id: body_id,
+                ops: Vec::new(),
+                terminator: HirTerminator::Jump { target: 0 },
+            });
+            let cond_id = ctx.blocks.len() as HirBlockId;
+            ctx.blocks.push(HirBlock {
+                id: cond_id,
+                ops: Vec::new(),
+                terminator: HirTerminator::Jump { target: 0 },
+            });
+
+            ctx.blocks[ctx.current_block].terminator = HirTerminator::Jump { target: body_id };
+
+            const DOWHILE_EXIT_PLACEHOLDER: HirBlockId = u32::MAX - 4;
+            loop_stack_push(ctx, cond_id, DOWHILE_EXIT_PLACEHOLDER);
+            if let Some(label) = ctx.current_loop_label.take() {
+                ctx.label_map
+                    .insert(label, (cond_id, DOWHILE_EXIT_PLACEHOLDER));
+            }
+            ctx.current_block = body_id as usize;
+            let body_exits = compile_statement(&d.body, ctx)?;
+            loop_stack_pop(ctx);
+            if !body_exits {
+                ctx.blocks[ctx.current_block].terminator =
+                    HirTerminator::Jump { target: cond_id };
+            } else {
+                ctx.blocks[ctx.current_block].terminator = terminator_for_exit(ctx);
+            }
+
+            ctx.current_block = cond_id as usize;
+            compile_expression(&d.condition, ctx)?;
+            ctx.blocks[ctx.current_block].ops.push(HirOp::StoreLocal {
+                id: cond_slot,
+                span: d.span,
+            });
+
+            ctx.blocks.push(HirBlock {
+                id: ctx.blocks.len() as HirBlockId,
+                ops: Vec::new(),
+                terminator: HirTerminator::Jump { target: 0 },
+            });
+            let exit_id = ctx.blocks.len() as HirBlockId - 1;
+            for block in &mut ctx.blocks {
+                match &mut block.terminator {
+                    HirTerminator::Jump { target } => {
+                        if *target == DOWHILE_EXIT_PLACEHOLDER {
+                            *target = exit_id;
+                        }
+                    }
+                    HirTerminator::Branch { else_block, .. } => {
+                        if *else_block == DOWHILE_EXIT_PLACEHOLDER {
+                            *else_block = exit_id;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            ctx.blocks[cond_id as usize].terminator = HirTerminator::Branch {
                 cond: cond_slot,
                 then_block: body_id,
                 else_block: exit_id,
@@ -2630,9 +2707,13 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                         .ops
                         .push(HirOp::Instanceof { span: e.span }),
                     BinaryOp::Comma => unreachable!("Comma handled in outer match"),
-                    BinaryOp::Eq
-                    | BinaryOp::NotEq
-                    | BinaryOp::LogicalAnd
+                    BinaryOp::Eq => ctx.blocks[ctx.current_block]
+                        .ops
+                        .push(HirOp::Eq { span: e.span }),
+                    BinaryOp::NotEq => ctx.blocks[ctx.current_block]
+                        .ops
+                        .push(HirOp::NotEq { span: e.span }),
+                    BinaryOp::LogicalAnd
                     | BinaryOp::LogicalOr
                     | BinaryOp::NullishCoalescing => {
                         return Err(LowerError::Unsupported(
@@ -2723,6 +2804,16 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                 ctx.blocks[ctx.current_block]
                     .ops
                     .push(HirOp::Typeof { span: e.span });
+            }
+            UnaryOp::Void => {
+                compile_expression(&e.argument, ctx)?;
+                ctx.blocks[ctx.current_block]
+                    .ops
+                    .push(HirOp::Pop { span: e.span });
+                ctx.blocks[ctx.current_block].ops.push(HirOp::LoadConst {
+                    value: HirConst::Undefined,
+                    span: e.span,
+                });
             }
             UnaryOp::Delete => {
                 if let Expression::Member(m) = e.argument.as_ref() {
