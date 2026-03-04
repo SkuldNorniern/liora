@@ -58,6 +58,16 @@ pub enum ErrorCode {
     RunUncaughtException,
     /// Callee is not callable (not a function or builtin)
     RunCalleeNotFunction,
+    /// VM stack underflow
+    RunStackUnderflow,
+    /// VM invalid opcode
+    RunInvalidOpcode,
+    /// VM invalid constant index
+    RunInvalidConstIndex,
+    /// Infinite loop detected
+    RunInfiniteLoopDetected,
+    /// Execution cancelled (timeout)
+    RunCancelled,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -102,9 +112,14 @@ impl ErrorCode {
             | Self::EarlyContinueOutsideIteration
             | Self::EarlyStrictReserved => ErrorCategory::Early,
             Self::BcNoFunction => ErrorCategory::Bytecode,
-            Self::RunNoMain | Self::RunUncaughtException | Self::RunCalleeNotFunction => {
-                ErrorCategory::Runtime
-            }
+            Self::RunNoMain
+            | Self::RunUncaughtException
+            | Self::RunCalleeNotFunction
+            | Self::RunStackUnderflow
+            | Self::RunInvalidOpcode
+            | Self::RunInvalidConstIndex
+            | Self::RunInfiniteLoopDetected
+            | Self::RunCancelled => ErrorCategory::Runtime,
         }
     }
 
@@ -136,6 +151,11 @@ impl ErrorCode {
             Self::RunNoMain => "JSINA-RUN-001",
             Self::RunUncaughtException => "JSINA-RUN-002",
             Self::RunCalleeNotFunction => "JSINA-RUN-003",
+            Self::RunStackUnderflow => "JSINA-RUN-004",
+            Self::RunInvalidOpcode => "JSINA-RUN-005",
+            Self::RunInvalidConstIndex => "JSINA-RUN-006",
+            Self::RunInfiniteLoopDetected => "JSINA-RUN-007",
+            Self::RunCancelled => "JSINA-RUN-008",
         }
     }
 }

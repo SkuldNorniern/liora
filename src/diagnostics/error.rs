@@ -1,5 +1,6 @@
 use super::codes::ErrorCode;
 use super::span::Span;
+use crate::vm::VmError;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Severity {
@@ -24,6 +25,8 @@ pub struct Diagnostic {
     pub severity: Severity,
     pub message: String,
     pub primary_span: Option<Span>,
+    pub cause: Option<String>,
+    pub help: Option<String>,
     pub notes: Vec<String>,
 }
 
@@ -39,6 +42,8 @@ impl Diagnostic {
             severity,
             message: message.into(),
             primary_span,
+            cause: None,
+            help: None,
             notes: Vec::new(),
         }
     }
@@ -72,6 +77,16 @@ impl Diagnostic {
         self
     }
 
+    pub fn with_cause(mut self, cause: impl Into<String>) -> Self {
+        self.cause = Some(cause.into());
+        self
+    }
+
+    pub fn with_help(mut self, help: impl Into<String>) -> Self {
+        self.help = Some(help.into());
+        self
+    }
+
     pub fn with_note(mut self, note: impl Into<String>) -> Self {
         self.notes.push(note.into());
         self
@@ -93,18 +108,30 @@ impl Diagnostic {
             .primary_span
             .map(|s| format!(" at {}", s))
             .unwrap_or_default();
-        out.push_str(&format!(
-            "{}: {} ({}){}\n",
-            self.severity.label(),
-            self.message,
-            self.code,
-            loc
-        ));
+        let header = match self.severity {
+            Severity::Error => format!("{} ({}){}\n", self.message, self.code, loc),
+            _ => format!(
+                "{}: {} ({}){}\n",
+                self.severity.label(),
+                self.message,
+                self.code,
+                loc
+            ),
+        };
+        out.push_str(&header);
 
         if let (Some(span), Some(src)) = (self.primary_span, source)
             && let Some(snippet) = self.extract_snippet(src, span)
         {
             out.push_str(&snippet);
+        }
+
+        if let Some(cause) = &self.cause {
+            out.push_str(&format!("  cause: {}\n", cause));
+        }
+
+        if let Some(help) = &self.help {
+            out.push_str(&format!("  help: {}\n", help));
         }
 
         for note in &self.notes {
@@ -159,7 +186,63 @@ pub fn callee_not_function_diagnostic(message: impl Into<String>) -> Diagnostic 
     } else {
         "the value being called must be a function, builtin, or method".to_string()
     };
-    Diagnostic::error(ErrorCode::RunCalleeNotFunction, msg, None).with_note(note)
+    Diagnostic::error(ErrorCode::RunCalleeNotFunction, msg, None)
+        .with_cause("a non-callable value was used as the target of a function call")
+        .with_help("ensure the expression before () is a function, builtin, or method")
+        .with_note(note)
+}
+
+/// Convert VM errors to diagnostics with cause and help.
+pub fn vm_error_to_diagnostic(e: &VmError) -> Diagnostic {
+    match e {
+        VmError::StackUnderflow {
+            chunk_index,
+            pc,
+            opcode,
+            stack_len,
+        } => Diagnostic::error(
+            ErrorCode::RunStackUnderflow,
+            "stack underflow",
+            None,
+        )
+        .with_cause(format!(
+            "opcode 0x{:02x} at chunk={} pc={} tried to pop with stack_len={}",
+            opcode, chunk_index, pc, stack_len
+        ))
+        .with_help("this usually indicates a compiler bug or invalid bytecode"),
+
+        VmError::InvalidOpcode(op) => Diagnostic::error(
+            ErrorCode::RunInvalidOpcode,
+            format!("invalid opcode: 0x{:02x}", op),
+            None,
+        )
+        .with_cause("the VM encountered an unrecognized bytecode instruction")
+        .with_note(format!("opcode 0x{:02x} is not defined", op)),
+
+        VmError::InvalidConstIndex(idx) => Diagnostic::error(
+            ErrorCode::RunInvalidConstIndex,
+            format!("invalid constant index: {}", idx),
+            None,
+        )
+        .with_cause("a constant pool index was out of bounds")
+        .with_help("ensure the bytecode references valid constant indices"),
+
+        VmError::InfiniteLoopDetected => Diagnostic::error(
+            ErrorCode::RunInfiniteLoopDetected,
+            "infinite loop detected",
+            None,
+        )
+        .with_cause("cycle detection found the same execution state repeated")
+        .with_help("add a terminating condition or break to the loop"),
+
+        VmError::Cancelled => Diagnostic::error(
+            ErrorCode::RunCancelled,
+            "execution cancelled (timeout)",
+            None,
+        )
+        .with_cause("execution was stopped by an external cancellation signal")
+        .with_help("increase timeout or fix the code if it runs too long"),
+    }
 }
 
 #[cfg(test)]
@@ -220,5 +303,30 @@ mod tests {
         let d = Diagnostic::error("JSINA-004", "span test", Some(span));
         let s = d.format(Some("abc\ndef"));
         assert!(s.contains("span continues to 2:3"));
+    }
+
+    #[test]
+    fn vm_error_stack_underflow_has_cause_and_help() {
+        let d = vm_error_to_diagnostic(&VmError::StackUnderflow {
+            chunk_index: 0,
+            pc: 0,
+            opcode: 0,
+            stack_len: 0,
+        });
+        let s = d.format(None);
+        assert!(s.contains("stack underflow"));
+        assert!(s.contains("cause:"));
+        assert!(s.contains("help:"));
+        assert!(s.contains("JSINA-RUN-004"));
+    }
+
+    #[test]
+    fn diagnostic_with_cause_and_help() {
+        let d = Diagnostic::error("E001", "test", None)
+            .with_cause("something went wrong")
+            .with_help("try doing X instead");
+        let s = d.format(None);
+        assert!(s.contains("cause: something went wrong"));
+        assert!(s.contains("help: try doing X instead"));
     }
 }
