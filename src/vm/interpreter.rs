@@ -5,13 +5,13 @@ use crate::runtime::builtins;
 use crate::runtime::{Heap, Value};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use super::calls::{execute_builtin, pop_args, read_i16, read_u8, read_u16, setup_callee_locals};
+use super::calls::{execute_builtin, pop_args, read_i16, read_u16, read_u8, setup_callee_locals};
 use super::ops::{
     add_values, div_values, gt_values, gte_values, in_check, instanceof_check, is_nullish,
     is_truthy, loose_eq, lt_values, lte_values, mod_values, mul_values, pow_values, strict_eq,
     sub_values, value_to_prop_key, value_to_prop_key_with_heap,
 };
-use super::props::{GetPropCache, resolve_get_prop};
+use super::props::{resolve_get_prop, GetPropCache};
 use super::tiering::{JitTiering, JitTieringStats};
 use super::types::{BuiltinResult, Completion, Program, VmError};
 
@@ -93,8 +93,9 @@ pub fn interpret_program_with_limit(
     trace: bool,
     _step_limit: Option<u64>,
 ) -> Result<Completion, VmError> {
-    let (result, _, _) =
-        interpret_program_with_trace_and_limit(program, trace, None, None, false, false, true, false);
+    let (result, _, _) = interpret_program_with_trace_and_limit(
+        program, trace, None, None, false, false, true, false,
+    );
     result
 }
 
@@ -142,8 +143,9 @@ pub fn interpret_program_with_limit_and_cancel_and_stats(
 }
 
 pub fn interpret_program_with_trace(program: &Program, trace: bool) -> Result<Completion, VmError> {
-    let (result, _, _) =
-        interpret_program_with_trace_and_limit(program, trace, None, None, false, false, true, false);
+    let (result, _, _) = interpret_program_with_trace_and_limit(
+        program, trace, None, None, false, false, true, false,
+    );
     result
 }
 
@@ -1191,8 +1193,8 @@ pub fn interpret_program_with_heap_and_entry(
                     }
                     Value::BoundBuiltin(builtin_id, bound_val, append_target) => {
                         let call_args: Vec<Value> = if append_target {
-                            let mut a: Vec<Value> = args.iter().cloned().collect();
-                            a.push(bound_val.as_ref().clone());
+                            let mut a = vec![bound_val.as_ref().clone()];
+                            a.extend(args.iter().cloned());
                             a
                         } else {
                             let mut a = vec![bound_val.as_ref().clone()];
@@ -1988,8 +1990,8 @@ fn handle_apply_invoke(
             }
             Value::BoundBuiltin(builtin_id, bound_val, append_target) => {
                 let call_args: Vec<Value> = if *append_target {
-                    let mut a: Vec<Value> = args.iter().cloned().collect();
-                    a.push(bound_val.as_ref().clone());
+                    let mut a = vec![bound_val.as_ref().clone()];
+                    a.extend(args.iter().cloned());
                     a
                 } else {
                     let mut a = vec![bound_val.as_ref().clone()];

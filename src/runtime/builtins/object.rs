@@ -2,7 +2,31 @@ use super::to_prop_key_with_heap;
 use crate::runtime::builtins;
 use crate::runtime::{Heap, Value};
 
+fn object_static_args<'a>(args: &'a [Value], heap: &Heap) -> &'a [Value] {
+    if args.len() < 2 {
+        return args;
+    }
+    match &args[0] {
+        Value::Undefined | Value::Null => &args[1..],
+        Value::Object(object_id) => {
+            if *object_id == heap.global_object() {
+                return &args[1..];
+            }
+            let has_object_constructor_shape =
+                matches!(heap.get_prop(*object_id, "prototype"), Value::Object(_))
+                    && matches!(heap.get_prop(*object_id, "create"), Value::Builtin(_));
+            if has_object_constructor_shape {
+                &args[1..]
+            } else {
+                args
+            }
+        }
+        _ => args,
+    }
+}
+
 pub fn from_entries(args: &[Value], heap: &mut Heap) -> Value {
+    let args = object_static_args(args, heap);
     let iterable = match args.first() {
         Some(v) => v,
         None => return Value::Object(heap.alloc_object()),
@@ -38,6 +62,7 @@ pub fn from_entries(args: &[Value], heap: &mut Heap) -> Value {
 }
 
 pub fn create(args: &[Value], heap: &mut Heap) -> Value {
+    let args = object_static_args(args, heap);
     let prototype = args.first().and_then(|p| match p {
         Value::Null | Value::Undefined => None,
         Value::Object(id) => Some(*id),
@@ -48,6 +73,7 @@ pub fn create(args: &[Value], heap: &mut Heap) -> Value {
 }
 
 pub fn keys(args: &[Value], heap: &mut Heap) -> Value {
+    let args = object_static_args(args, heap);
     let arr_id = heap.alloc_array();
     let keys: Vec<String> = match args.first() {
         Some(Value::Object(obj_id)) => heap.object_keys(*obj_id),
@@ -74,6 +100,7 @@ pub fn keys(args: &[Value], heap: &mut Heap) -> Value {
 }
 
 pub fn values(args: &[Value], heap: &mut Heap) -> Value {
+    let args = object_static_args(args, heap);
     let arr_id = heap.alloc_array();
     match args.first() {
         Some(Value::Object(obj_id)) => {
@@ -98,6 +125,7 @@ pub fn values(args: &[Value], heap: &mut Heap) -> Value {
 }
 
 pub fn entries(args: &[Value], heap: &mut Heap) -> Value {
+    let args = object_static_args(args, heap);
     let outer_id = heap.alloc_array();
     if let Some(Value::Object(obj_id)) = args.first() {
         let ks = heap.object_keys(*obj_id);
@@ -116,6 +144,7 @@ pub fn entries(args: &[Value], heap: &mut Heap) -> Value {
 }
 
 pub fn assign(args: &[Value], heap: &mut Heap) -> Value {
+    let args = object_static_args(args, heap);
     let target = match args.first() {
         Some(v) => v,
         None => return Value::Undefined,
@@ -181,7 +210,13 @@ pub fn property_is_enumerable(args: &[Value], heap: &mut Heap) -> Value {
         .map(|v| to_prop_key_with_heap(v, heap))
         .unwrap_or_default();
     let result = match args.first() {
-        Some(Value::Object(id)) => heap.object_has_own_property(*id, &key),
+        Some(Value::Object(id)) => {
+            if !heap.object_has_own_property(*id, &key) {
+                false
+            } else {
+                !matches!(heap.get_prop(*id, &key), Value::Builtin(_))
+            }
+        }
         Some(Value::Function(function_index)) => {
             key != "name" && heap.function_has_own_property(*function_index, &key)
         }
@@ -254,6 +289,7 @@ pub fn is_sealed(_args: &[Value], _heap: &mut Heap) -> Value {
 }
 
 pub fn has_own(args: &[Value], heap: &mut Heap) -> Value {
+    let args = object_static_args(args, heap);
     let key = args
         .get(1)
         .map(|v| to_prop_key_with_heap(v, heap))
@@ -272,6 +308,7 @@ pub fn has_own(args: &[Value], heap: &mut Heap) -> Value {
 }
 
 pub fn is_same_value(args: &[Value], _heap: &mut Heap) -> Value {
+    let args = if args.len() >= 3 { &args[1..] } else { args };
     let a = args.get(0).unwrap_or(&Value::Undefined);
     let b = args.get(1).unwrap_or(&Value::Undefined);
     Value::Bool(same_value(a, b))
@@ -311,6 +348,7 @@ fn create_data_descriptor(
 }
 
 pub fn get_own_property_descriptor(args: &[Value], heap: &mut Heap) -> Value {
+    let args = object_static_args(args, heap);
     let target = match args.first() {
         Some(value) => value,
         None => return Value::Undefined,
@@ -375,6 +413,7 @@ pub fn get_own_property_descriptor(args: &[Value], heap: &mut Heap) -> Value {
 }
 
 pub fn get_own_property_names(args: &[Value], heap: &mut Heap) -> Value {
+    let args = object_static_args(args, heap);
     let names_array_id = heap.alloc_array();
     let target = args.first();
     let target = match target {
@@ -411,6 +450,7 @@ pub fn get_own_property_names(args: &[Value], heap: &mut Heap) -> Value {
 }
 
 pub fn define_property(args: &[Value], heap: &mut Heap) -> Value {
+    let args = object_static_args(args, heap);
     let target = match args.first() {
         Some(value) => value.clone(),
         None => return Value::Undefined,
@@ -446,6 +486,7 @@ pub fn define_property(args: &[Value], heap: &mut Heap) -> Value {
 }
 
 pub fn define_properties(args: &[Value], heap: &mut Heap) -> Value {
+    let args = object_static_args(args, heap);
     let target = match args.first() {
         Some(value) => value.clone(),
         None => return Value::Undefined,
@@ -620,5 +661,27 @@ mod tests {
                 || (first == Value::String("y".to_string())
                     && second == Value::String("x".to_string()))
         );
+    }
+
+    #[test]
+    fn property_is_enumerable_is_false_for_builtin_method_on_string_prototype() {
+        let mut heap = Heap::new();
+        let string_ctor = heap.get_global("String");
+        let string_proto = match string_ctor {
+            Value::Object(id) => heap.get_prop(id, "prototype"),
+            _ => Value::Undefined,
+        };
+        let string_proto_id = match string_proto {
+            Value::Object(id) => id,
+            other => panic!("expected String.prototype object, got {:?}", other),
+        };
+        let result = property_is_enumerable(
+            &[
+                Value::Object(string_proto_id),
+                Value::String("big".to_string()),
+            ],
+            &mut heap,
+        );
+        assert_eq!(result, Value::Bool(false));
     }
 }

@@ -16,9 +16,9 @@ pub enum Value {
     Function(usize),
     DynamicFunction(usize),
     Builtin(u8),
-    /// (builtin_id, bound_value, append_target)
-    /// append_target=true: call.bind(target) -> args = [invocation_args..., target]
-    /// append_target=false: method.bind(this_val) -> args = [this_val, invocation_args...]
+    /// (builtin_id, bound_value, binds_function_target)
+    /// binds_function_target=true: call.bind(target) binds Function.prototype.call target
+    /// binds_function_target=false: method.bind(this_val) binds normal this receiver
     BoundBuiltin(u8, Box<Value>, bool),
     /// (target, bound_this, bound_args) for Function/DynamicFunction.bind()
     BoundFunction(Box<Value>, Box<Value>, Vec<Value>),

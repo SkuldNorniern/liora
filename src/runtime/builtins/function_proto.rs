@@ -1,8 +1,27 @@
 //! Function.prototype.call, bind, apply - required for propertyHelper and test262 harness.
 //! call invokes builtins with explicit this. apply supports Function, Builtin, DynamicFunction.
 
-use super::{BuiltinContext, BuiltinError, to_number};
+use super::{to_number, BuiltinContext, BuiltinError};
 use crate::runtime::{Heap, Value};
+
+fn is_callable_value(value: &Value, heap: &Heap) -> bool {
+    match value {
+        Value::Function(_)
+        | Value::DynamicFunction(_)
+        | Value::BoundFunction(_, _, _)
+        | Value::Builtin(_)
+        | Value::BoundBuiltin(_, _, _) => true,
+        Value::Object(object_id) => matches!(
+            heap.get_prop(*object_id, "__call__"),
+            Value::Function(_)
+                | Value::DynamicFunction(_)
+                | Value::BoundFunction(_, _, _)
+                | Value::Builtin(_)
+                | Value::BoundBuiltin(_, _, _)
+        ),
+        _ => false,
+    }
+}
 
 fn array_like_to_values(arr: &Value, heap: &Heap) -> Vec<Value> {
     let len = match arr {
@@ -52,6 +71,12 @@ pub fn function_call(args: &[Value], ctx: &mut BuiltinContext) -> Result<Value, 
             args: actual_args,
             new_object: None,
         }),
+        Value::Object(_) if is_callable_value(target, ctx.heap) => Err(BuiltinError::Invoke {
+            callee: target.clone(),
+            this_arg,
+            args: actual_args,
+            new_object: None,
+        }),
         _ => Err(BuiltinError::Throw(Value::String(format!(
             "Function.prototype.call target must be callable (got {})",
             target.type_name_for_error()
@@ -66,15 +91,7 @@ pub fn function_apply(args: &[Value], ctx: &mut BuiltinContext) -> Result<Value,
         )));
     }
     let target = &args[0];
-    let is_callable = matches!(
-        target,
-        Value::Function(_)
-            | Value::DynamicFunction(_)
-            | Value::BoundFunction(_, _, _)
-            | Value::Builtin(_)
-            | Value::BoundBuiltin(_, _, _)
-            | Value::Object(_)
-    );
+    let is_callable = is_callable_value(target, ctx.heap);
     if !is_callable {
         return Err(BuiltinError::Throw(Value::String(format!(
             "TypeError: Function.prototype.apply target is not callable (got {})",
@@ -96,7 +113,7 @@ pub fn function_apply(args: &[Value], ctx: &mut BuiltinContext) -> Result<Value,
     })
 }
 
-pub fn function_bind(args: &[Value], _ctx: &mut BuiltinContext) -> Result<Value, BuiltinError> {
+pub fn function_bind(args: &[Value], ctx: &mut BuiltinContext) -> Result<Value, BuiltinError> {
     if args.len() < 2 {
         return Err(BuiltinError::Throw(Value::String(
             "Function.prototype.bind requires at least one argument".to_string(),
@@ -124,6 +141,11 @@ pub fn function_bind(args: &[Value], _ctx: &mut BuiltinContext) -> Result<Value,
             Box::new(bound_this),
             bound_args,
         )),
+        Value::Object(_) if is_callable_value(target, ctx.heap) => Ok(Value::BoundFunction(
+            Box::new(target.clone()),
+            Box::new(bound_this),
+            bound_args,
+        )),
         Value::BoundFunction(inner_target, _inner_this, inner_args) => {
             let mut merged = inner_args.clone();
             merged.extend(bound_args);
@@ -143,7 +165,7 @@ pub fn function_bind(args: &[Value], _ctx: &mut BuiltinContext) -> Result<Value,
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::builtins::{BuiltinContext, resolve};
+    use crate::runtime::builtins::{resolve, BuiltinContext};
 
     #[test]
     fn bind_creates_bound_builtin_for_call_and_method() {
@@ -165,7 +187,7 @@ mod tests {
             Value::BoundBuiltin(id, b, append) => {
                 assert_eq!(*id, call_id);
                 assert_eq!(b.as_ref(), &join_builtin);
-                assert!(*append, "call.bind uses append_target");
+                assert!(*append, "call.bind marks bound function target mode");
             }
             _ => panic!("expected BoundBuiltin"),
         }
@@ -177,5 +199,50 @@ mod tests {
             }
             _ => panic!("expected BoundBuiltin"),
         }
+    }
+
+    #[test]
+    fn function_call_accepts_object_with_call_slot() {
+        let mut heap = Heap::new();
+        let mut ctx = BuiltinContext { heap: &mut heap };
+        let object_id = ctx.heap.alloc_object();
+        let string_ctor_id = resolve("Type", "String").expect("String constructor builtin");
+        ctx.heap
+            .set_prop(object_id, "__call__", Value::Builtin(string_ctor_id));
+
+        let result = function_call(
+            &[
+                Value::Object(object_id),
+                Value::Undefined,
+                Value::String("abc".to_string()),
+            ],
+            &mut ctx,
+        );
+
+        assert!(matches!(
+            result,
+            Err(BuiltinError::Invoke {
+                callee: Value::Object(id),
+                ..
+            }) if id == object_id
+        ));
+    }
+
+    #[test]
+    fn function_call_rejects_object_without_call_slot() {
+        let mut heap = Heap::new();
+        let mut ctx = BuiltinContext { heap: &mut heap };
+        let object_id = ctx.heap.alloc_object();
+
+        let result = function_call(
+            &[Value::Object(object_id), Value::Undefined, Value::Int(1)],
+            &mut ctx,
+        );
+
+        assert!(matches!(
+            result,
+            Err(BuiltinError::Throw(Value::String(msg)))
+                if msg.contains("target must be callable")
+        ));
     }
 }
