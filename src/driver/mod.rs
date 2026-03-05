@@ -115,12 +115,12 @@ impl Driver {
 
     pub fn run_with_trace(source: &str, trace: bool) -> Result<i64, DriverError> {
         let host = CliHost;
-        Self::run_with_host(&host, source, trace, false)
+        Self::run_with_host(&host, source, trace, false, false)
     }
 
     pub fn run_with_jit(source: &str, trace: bool) -> Result<i64, DriverError> {
         let host = CliHost;
-        Self::run_with_host(&host, source, trace, true)
+        Self::run_with_host(&host, source, trace, true, false)
     }
 
     pub fn run_with_host_and_jit_stats<H: HostHooks + 'static>(
@@ -128,22 +128,27 @@ impl Driver {
         source: &str,
         trace: bool,
         enable_jit: bool,
+        compat_mode: bool,
     ) -> Result<i64, DriverError> {
         with_host(host, || {
-            Self::run_with_host_and_limit_inner(source, trace, None, enable_jit, true, false, false)
-                .map(|v| v.to_i64())
+            Self::run_with_host_and_limit_inner(
+                source, trace, None, enable_jit, true, false, false, compat_mode,
+            )
+            .map(|v| v.to_i64())
         })
     }
 
     /// Run with custom host. Use for browser embedding (provide HostHooks impl).
+    /// compat_mode: when true, adds Node-like stubs (require, process).
     pub fn run_with_host<H: HostHooks + 'static>(
         host: &H,
         source: &str,
         trace: bool,
         enable_jit: bool,
+        compat_mode: bool,
     ) -> Result<i64, DriverError> {
         with_host(host, || {
-            Self::run_with_host_inner(source, trace, enable_jit)
+            Self::run_with_host_inner(source, trace, enable_jit, compat_mode)
         })
     }
 
@@ -176,6 +181,7 @@ impl Driver {
                 false,
                 enable_infinite_loop_detection,
                 test262_mode,
+                false,
             )
             .map(|v| v.to_i64())
         })
@@ -185,15 +191,18 @@ impl Driver {
         source: &str,
         trace: bool,
         enable_jit: bool,
+        compat_mode: bool,
     ) -> Result<i64, DriverError> {
-        Self::run_with_host_and_limit_inner(source, trace, None, enable_jit, false, false, false)
-            .map(|v| v.to_i64())
+        Self::run_with_host_and_limit_inner(
+            source, trace, None, enable_jit, false, false, false, compat_mode,
+        )
+        .map(|v| v.to_i64())
     }
 
     pub fn run_to_string(source: &str) -> Result<String, DriverError> {
         let host = CliHost;
         with_host(&host, || {
-            Self::run_with_host_and_limit_inner(source, false, None, false, false, false, false)
+            Self::run_with_host_and_limit_inner(source, false, None, false, false, false, false, false)
                 .map(|v| format!("{}", v))
         })
     }
@@ -206,6 +215,7 @@ impl Driver {
         emit_jit_stats: bool,
         enable_infinite_loop_detection: bool,
         test262_mode: bool,
+        compat_mode: bool,
     ) -> Result<Value, DriverError> {
         let script = Self::ast(source)?;
         let funcs = script_to_hir(&script)?;
@@ -267,6 +277,7 @@ impl Driver {
                 None,
                 cancel,
                 test262_mode,
+                compat_mode,
                 enable_jit,
                 enable_infinite_loop_detection,
             );
@@ -336,6 +347,7 @@ mod tests {
             "function main() { print(\"hi\"); return 0; }",
             false,
             false,
+            false,
         );
         assert!(r.is_ok());
         let v = captured.borrow();
@@ -377,8 +389,8 @@ mod tests {
     #[test]
     fn jit_parity_simple_arithmetic() {
         let source = "function main() { return 10 + 32; }";
-        let interp = Driver::run_with_host(&crate::host::CliHost, source, false, false);
-        let jit = Driver::run_with_host(&crate::host::CliHost, source, false, true);
+        let interp = Driver::run_with_host(&crate::host::CliHost, source, false, false, false);
+        let jit = Driver::run_with_host(&crate::host::CliHost, source, false, true, false);
         assert!(interp.is_ok(), "interpreter: {:?}", interp);
         assert!(jit.is_ok(), "jit: {:?}", jit);
         assert_eq!(interp.unwrap(), jit.unwrap(), "jit must match interpreter");
@@ -387,8 +399,8 @@ mod tests {
     #[test]
     fn jit_parity_loop_sum() {
         let source = "function main() { var sum = 0; for (var i = 1; i <= 100; i++) { sum += i; } return sum; }";
-        let interp = Driver::run_with_host(&crate::host::CliHost, source, false, false);
-        let jit = Driver::run_with_host(&crate::host::CliHost, source, false, true);
+        let interp = Driver::run_with_host(&crate::host::CliHost, source, false, false, false);
+        let jit = Driver::run_with_host(&crate::host::CliHost, source, false, true, false);
         assert!(interp.is_ok(), "interpreter: {:?}", interp);
         assert!(jit.is_ok(), "jit: {:?}", jit);
         assert_eq!(interp.unwrap(), jit.unwrap(), "jit must match interpreter");
@@ -397,8 +409,8 @@ mod tests {
     #[test]
     fn jit_parity_pow() {
         let source = "function main() { return 2 ** 10; }";
-        let interp = Driver::run_with_host(&crate::host::CliHost, source, false, false);
-        let jit = Driver::run_with_host(&crate::host::CliHost, source, false, true);
+        let interp = Driver::run_with_host(&crate::host::CliHost, source, false, false, false);
+        let jit = Driver::run_with_host(&crate::host::CliHost, source, false, true, false);
         assert!(interp.is_ok(), "interpreter: {:?}", interp);
         assert!(jit.is_ok(), "jit: {:?}", jit);
         assert_eq!(interp.unwrap(), jit.unwrap(), "jit must match interpreter");

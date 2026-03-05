@@ -4808,8 +4808,17 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                         });
                     }
                     MemberProperty::Expression(key_expr) => {
+                        let obj_slot = alloc_slot(ctx);
+                        let key_slot = alloc_slot(ctx);
+                        op(ctx, HirOp::StoreLocal { id: obj_slot, span: e.span });
                         compile_expression(key_expr, ctx)?;
+                        op(ctx, HirOp::StoreLocal { id: key_slot, span: e.span });
                         compile_expression(&e.right, ctx)?;
+                        let value_slot = alloc_slot(ctx);
+                        op(ctx, HirOp::StoreLocal { id: value_slot, span: e.span });
+                        op(ctx, HirOp::LoadLocal { id: obj_slot, span: e.span });
+                        op(ctx, HirOp::LoadLocal { id: key_slot, span: e.span });
+                        op(ctx, HirOp::LoadLocal { id: value_slot, span: e.span });
                         ctx.blocks[ctx.current_block]
                             .ops
                             .push(HirOp::SetPropDyn { span: e.span });
@@ -6245,6 +6254,23 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                             span: n.span,
                         });
                     }
+                    Expression::Identifier(id) if id.name == "WeakMap" && n.args.is_empty() => {
+                        ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
+                            builtin: b("WeakMap", "create"),
+                            argc: 0,
+                            span: n.span,
+                        });
+                    }
+                    Expression::Identifier(id) if id.name == "Proxy" && n.args.len() == 2 => {
+                        for arg in &n.args {
+                            compile_call_arg(arg, ctx, n.span)?;
+                        }
+                        ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
+                            builtin: b("Proxy", "create"),
+                            argc: 2,
+                            span: n.span,
+                        });
+                    }
                     Expression::Identifier(id) if id.name == "Date" => {
                         for arg in &n.args {
                             compile_call_arg(arg, ctx, n.span)?;
@@ -6751,6 +6777,18 @@ mod tests {
         assert_eq!(
             result, 1,
             "s.push(1) must call custom function with this=s, which pushes to this.items and returns length"
+        );
+    }
+
+    #[test]
+    fn lower_assign_computed_prop_rhs_reads_same_prop() {
+        let result = crate::driver::Driver::run(
+            "function main(){ var acc = {}; acc[6] = (acc[6] || []).concat(6.1); acc[6] = (acc[6] || []).concat(6.3); return acc[6].length; }",
+        )
+        .expect("run");
+        assert_eq!(
+            result, 2,
+            "acc[key]=expr where expr reads acc[key] must use saved obj/key for SetPropDyn"
         );
     }
 

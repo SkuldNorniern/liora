@@ -808,11 +808,24 @@ impl Heap {
         self.set_prop(global_id, "WeakMap", Value::Object(weakmap_id));
         let weakset_id = self.alloc_object();
         self.set_prop(global_id, "WeakSet", Value::Object(weakset_id));
+        let proxy_id = self.alloc_object();
+        self.set_prop(global_id, "Proxy", Value::Object(proxy_id));
         self.set_prop(
             global_id,
             "DataView",
             Value::Builtin(b("TypedArray", "DataView")),
         );
+    }
+
+    /// Node-compat globals (require, process). Opt-in via --compat. Stubs only.
+    pub fn init_compat_globals(&mut self) {
+        let global_id = self.global_object_id;
+        let require_builtin = builtins::resolve("Compat", "require").expect("Compat.require");
+        self.set_prop(global_id, "require", Value::Builtin(require_builtin));
+        let process_id = self.alloc_object();
+        let env_id = self.alloc_object();
+        self.set_prop(process_id, "env", Value::Object(env_id));
+        self.set_prop(global_id, "process", Value::Object(process_id));
     }
 
     /// Add $262 host object for test262 harness. Match V8/Bun/Deno: $262 only exists when running via test262.
@@ -844,8 +857,6 @@ impl Heap {
         self.set_prop(global_id, "timeout", Value::Builtin(b("Host", "timeout")));
         let temporal_id = self.alloc_object();
         self.set_prop(global_id, "Temporal", Value::Object(temporal_id));
-        let proxy_id = self.alloc_object();
-        self.set_prop(global_id, "Proxy", Value::Object(proxy_id));
         let intl_id = self.alloc_object();
         self.set_prop(global_id, "Intl", Value::Object(intl_id));
         self.set_prop(global_id, "testResult", Value::Undefined);

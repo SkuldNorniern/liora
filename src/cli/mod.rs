@@ -56,6 +56,7 @@ OPTIONS (run):
     --trace-exec    Print each opcode as it executes (debug)
     --jit           Try JIT for trivial main (numeric only); fallback to interpreter
     --jit-stats     Print JIT/tiering counters to stderr
+    --compat        Node compat: add require, process stubs (for running Node-style scripts)
 
 EXAMPLES:
     jsina run script.js
@@ -81,7 +82,7 @@ pub fn run(args: &[String]) -> Result<(), CliError> {
             crate::serve::serve(&serve_dir, port)?;
         }
         "run" => {
-            let (seed, trace, jit, jit_stats) = parse_run_opts(args);
+            let (seed, trace, jit, jit_stats, compat) = parse_run_opts(args);
             if let Some(s) = seed {
                 crate::runtime::builtins::seed_random(s);
             }
@@ -92,11 +93,12 @@ pub fn run(args: &[String]) -> Result<(), CliError> {
                     &source,
                     trace,
                     jit_enabled,
+                    compat,
                 )?
             } else if jit_enabled {
-                Driver::run_with_host(&crate::host::CliHost, &source, trace, true)?
+                Driver::run_with_host(&crate::host::CliHost, &source, trace, true, compat)?
             } else {
-                Driver::run_with_host(&crate::host::CliHost, &source, trace, false)?
+                Driver::run_with_host(&crate::host::CliHost, &source, trace, false, compat)?
             };
             println!("{}", result);
         }
@@ -148,7 +150,7 @@ fn parse_args(args: &[String]) -> Result<(Option<String>, Option<&str>), CliErro
         } else if arg == "--seed" {
             i += 2;
             continue;
-        } else if arg == "--trace-exec" || arg == "--jit" || arg == "--jit-stats" {
+        } else if arg == "--trace-exec" || arg == "--jit" || arg == "--jit-stats" || arg == "--compat" {
             i += 1;
             continue;
         } else if arg == "--all" {
@@ -182,11 +184,12 @@ fn parse_args(args: &[String]) -> Result<(Option<String>, Option<&str>), CliErro
     Ok((command, path))
 }
 
-fn parse_run_opts(args: &[String]) -> (Option<u64>, bool, bool, bool) {
+fn parse_run_opts(args: &[String]) -> (Option<u64>, bool, bool, bool, bool) {
     let mut seed = None;
     let mut trace = false;
     let mut jit = false;
     let mut jit_stats = false;
+    let mut compat = false;
     let mut i = 1;
     while i < args.len() {
         if args[i] == "--seed" {
@@ -204,11 +207,14 @@ fn parse_run_opts(args: &[String]) -> (Option<u64>, bool, bool, bool) {
         } else if args[i] == "--jit-stats" {
             jit_stats = true;
             i += 1;
+        } else if args[i] == "--compat" {
+            compat = true;
+            i += 1;
         } else {
             i += 1;
         }
     }
-    (seed, trace, jit, jit_stats)
+    (seed, trace, jit, jit_stats, compat)
 }
 
 fn parse_serve_opts(

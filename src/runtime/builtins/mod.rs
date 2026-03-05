@@ -28,6 +28,9 @@ mod string;
 mod symbol;
 mod timeout;
 mod typed_array;
+mod weakmap;
+mod proxy;
+mod compat;
 
 use crate::runtime::{Heap, Value};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -903,6 +906,16 @@ const BUILTINS: &[BuiltinDef] = &[
         name: "size",
         entry: BuiltinEntry::Normal(set::size),
     },
+    BuiltinDef {
+        category: "WeakMap",
+        name: "create",
+        entry: BuiltinEntry::Normal(weakmap::create),
+    },
+    BuiltinDef {
+        category: "Proxy",
+        name: "create",
+        entry: BuiltinEntry::Normal(proxy::create),
+    },
     // Collection 0 (Map/Set .has shared)
     BuiltinDef {
         category: "Collection",
@@ -1255,6 +1268,11 @@ const BUILTINS: &[BuiltinDef] = &[
         category: "Promise",
         name: "all",
         entry: BuiltinEntry::Throwing(promise::promise_all),
+    },
+    BuiltinDef {
+        category: "Compat",
+        name: "require",
+        entry: BuiltinEntry::Normal(compat::require),
     },
 ];
 

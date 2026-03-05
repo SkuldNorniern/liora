@@ -94,7 +94,7 @@ pub fn interpret_program_with_limit(
     _step_limit: Option<u64>,
 ) -> Result<Completion, VmError> {
     let (result, _, _) =
-        interpret_program_with_trace_and_limit(program, trace, None, None, false, true, false);
+        interpret_program_with_trace_and_limit(program, trace, None, None, false, false, true, false);
     result
 }
 
@@ -112,6 +112,7 @@ pub fn interpret_program_with_limit_and_cancel(
         None,
         cancel,
         test262_mode,
+        false,
         true,
         enable_infinite_loop_detection,
     );
@@ -124,6 +125,7 @@ pub fn interpret_program_with_limit_and_cancel_and_stats(
     _step_limit: Option<u64>,
     cancel: Option<&AtomicBool>,
     test262_mode: bool,
+    compat_mode: bool,
     enable_jit: bool,
     enable_infinite_loop_detection: bool,
 ) -> (Result<Completion, VmError>, Heap, Option<JitTieringStats>) {
@@ -133,6 +135,7 @@ pub fn interpret_program_with_limit_and_cancel_and_stats(
         None,
         cancel,
         test262_mode,
+        compat_mode,
         enable_jit,
         enable_infinite_loop_detection,
     )
@@ -140,7 +143,7 @@ pub fn interpret_program_with_limit_and_cancel_and_stats(
 
 pub fn interpret_program_with_trace(program: &Program, trace: bool) -> Result<Completion, VmError> {
     let (result, _, _) =
-        interpret_program_with_trace_and_limit(program, trace, None, None, false, true, false);
+        interpret_program_with_trace_and_limit(program, trace, None, None, false, false, true, false);
     result
 }
 
@@ -156,12 +159,16 @@ fn interpret_program_with_trace_and_limit(
     _step_limit: Option<u64>,
     cancel: Option<&AtomicBool>,
     test262_mode: bool,
+    compat_mode: bool,
     enable_jit: bool,
     enable_infinite_loop_detection: bool,
 ) -> (Result<Completion, VmError>, Heap, Option<JitTieringStats>) {
     let mut heap = Heap::new();
     if test262_mode {
         heap.init_test262_globals();
+    }
+    if compat_mode {
+        heap.init_compat_globals();
     }
     let global_id = heap.global_object();
     for (name, chunk_idx) in &program.global_funcs {
