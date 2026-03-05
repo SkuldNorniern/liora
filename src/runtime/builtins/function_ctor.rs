@@ -2,11 +2,11 @@
 //! Uses eval internally. Last argument is body, preceding are param names.
 //! Returns Value::DynamicFunction so the created function can be invoked in the caller's context.
 
-use super::{BuiltinContext, BuiltinError, to_prop_key};
-use crate::frontend::{Parser, check_early_errors};
+use super::{to_prop_key, BuiltinContext, BuiltinError};
+use crate::frontend::{check_early_errors, Parser};
 use crate::ir::{hir_to_bytecode, script_to_hir};
 use crate::runtime::Value;
-use crate::vm::{Completion, Program, interpret_program_with_heap};
+use crate::vm::{interpret_program_with_heap, Completion, Program};
 
 pub fn function_constructor(
     args: &[Value],

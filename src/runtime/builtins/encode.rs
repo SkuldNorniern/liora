@@ -1,5 +1,5 @@
 //! encodeURI, encodeURIComponent, decodeURI, decodeURIComponent - percent-encode/decode URI.
-use super::{BuiltinError, to_prop_key};
+use super::{to_prop_key, BuiltinError};
 use crate::runtime::Value;
 
 const DECODE_URI_RESERVED: &[u8] = b";,/?:@&=+$#";

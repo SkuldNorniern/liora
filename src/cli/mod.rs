@@ -49,7 +49,7 @@ COMMANDS:
     hir      Dump HIR / Lamina IR
     bc       Dump bytecode
     ir       Alias for hir - dump Lamina IR
-    test262  Run test262 (allowlist or --all; --json for CI; default repo: asset/test262)
+    test262  Run test262 (allowlist or --all; --filter PAT; --limit N; --json for CI)
 
 OPTIONS (run):
     --seed N        Seed RNG for deterministic Math.random (M2 replay)
@@ -118,8 +118,8 @@ pub fn run(args: &[String]) -> Result<(), CliError> {
             println!("{}", bc);
         }
         "test262" => {
-            let (flag_dir, all, json, limit) = parse_test262_args(args)?;
-            commands::test262(flag_dir.as_deref(), all, json, limit)?;
+            let (flag_dir, all, json, limit, filter) = parse_test262_args(args)?;
+            commands::test262(flag_dir.as_deref(), all, json, limit, filter.as_deref())?;
         }
         "help" | "-h" | "--help" => {
             print!("{}", HELP);
@@ -150,7 +150,11 @@ fn parse_args(args: &[String]) -> Result<(Option<String>, Option<&str>), CliErro
         } else if arg == "--seed" {
             i += 2;
             continue;
-        } else if arg == "--trace-exec" || arg == "--jit" || arg == "--jit-stats" || arg == "--compat" {
+        } else if arg == "--trace-exec"
+            || arg == "--jit"
+            || arg == "--jit-stats"
+            || arg == "--compat"
+        {
             i += 1;
             continue;
         } else if arg == "--all" {
@@ -159,7 +163,7 @@ fn parse_args(args: &[String]) -> Result<(Option<String>, Option<&str>), CliErro
         } else if arg == "--json" {
             i += 1;
             continue;
-        } else if arg == "--limit" {
+        } else if arg == "--limit" || arg == "--filter" {
             i += 2;
             continue;
         } else if arg == "--port" {
@@ -240,11 +244,12 @@ fn parse_serve_opts(
 
 fn parse_test262_args(
     args: &[String],
-) -> Result<(Option<String>, bool, bool, Option<usize>), CliError> {
+) -> Result<(Option<String>, bool, bool, Option<usize>, Option<String>), CliError> {
     let mut test262_dir = None;
     let mut all = false;
     let mut json = false;
     let mut limit = None;
+    let mut filter = None;
     let mut i = 1;
     while i < args.len() {
         let arg = &args[i];
@@ -266,11 +271,17 @@ fn parse_test262_args(
                 limit = args[i].parse().ok();
                 i += 1;
             }
+        } else if arg == "--filter" {
+            i += 1;
+            if i < args.len() {
+                filter = Some(args[i].clone());
+                i += 1;
+            }
         } else {
             i += 1;
         }
     }
-    Ok((test262_dir, all, json, limit))
+    Ok((test262_dir, all, json, limit, filter))
 }
 
 fn load_source(path: Option<&str>) -> Result<String, CliError> {

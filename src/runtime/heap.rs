@@ -631,6 +631,171 @@ impl Heap {
         self.set_prop(regexp_id, "prototype", Value::Object(regexp_proto_id));
         self.set_prop(regexp_id, "escape", Value::Builtin(b("RegExp", "escape")));
         self.set_prop(regexp_id, "__call__", Value::Builtin(b("RegExp", "create")));
+        self.set_prop(
+            regexp_id,
+            "__legacy_regexp_paren1",
+            Value::String(String::new()),
+        );
+        self.set_prop(
+            regexp_id,
+            "__legacy_regexp_paren2",
+            Value::String(String::new()),
+        );
+        self.set_prop(
+            regexp_id,
+            "__legacy_regexp_paren3",
+            Value::String(String::new()),
+        );
+        self.set_prop(
+            regexp_id,
+            "__legacy_regexp_paren4",
+            Value::String(String::new()),
+        );
+        self.set_prop(
+            regexp_id,
+            "__legacy_regexp_paren5",
+            Value::String(String::new()),
+        );
+        self.set_prop(
+            regexp_id,
+            "__legacy_regexp_paren6",
+            Value::String(String::new()),
+        );
+        self.set_prop(
+            regexp_id,
+            "__legacy_regexp_paren7",
+            Value::String(String::new()),
+        );
+        self.set_prop(
+            regexp_id,
+            "__legacy_regexp_paren8",
+            Value::String(String::new()),
+        );
+        self.set_prop(
+            regexp_id,
+            "__legacy_regexp_paren9",
+            Value::String(String::new()),
+        );
+        self.set_prop(
+            regexp_id,
+            "__legacy_regexp_input",
+            Value::String(String::new()),
+        );
+        self.set_prop(
+            regexp_id,
+            "__legacy_regexp_last_match",
+            Value::String(String::new()),
+        );
+        self.set_prop(
+            regexp_id,
+            "__legacy_regexp_last_paren",
+            Value::String(String::new()),
+        );
+        self.set_prop(
+            regexp_id,
+            "__legacy_regexp_left_context",
+            Value::String(String::new()),
+        );
+        self.set_prop(
+            regexp_id,
+            "__legacy_regexp_right_context",
+            Value::String(String::new()),
+        );
+        self.set_prop(
+            regexp_id,
+            "$1",
+            Value::Builtin(b("RegExp", "legacy_get_paren1")),
+        );
+        self.set_prop(
+            regexp_id,
+            "$2",
+            Value::Builtin(b("RegExp", "legacy_get_paren2")),
+        );
+        self.set_prop(
+            regexp_id,
+            "$3",
+            Value::Builtin(b("RegExp", "legacy_get_paren3")),
+        );
+        self.set_prop(
+            regexp_id,
+            "$4",
+            Value::Builtin(b("RegExp", "legacy_get_paren4")),
+        );
+        self.set_prop(
+            regexp_id,
+            "$5",
+            Value::Builtin(b("RegExp", "legacy_get_paren5")),
+        );
+        self.set_prop(
+            regexp_id,
+            "$6",
+            Value::Builtin(b("RegExp", "legacy_get_paren6")),
+        );
+        self.set_prop(
+            regexp_id,
+            "$7",
+            Value::Builtin(b("RegExp", "legacy_get_paren7")),
+        );
+        self.set_prop(
+            regexp_id,
+            "$8",
+            Value::Builtin(b("RegExp", "legacy_get_paren8")),
+        );
+        self.set_prop(
+            regexp_id,
+            "$9",
+            Value::Builtin(b("RegExp", "legacy_get_paren9")),
+        );
+        self.set_prop(
+            regexp_id,
+            "input",
+            Value::Builtin(b("RegExp", "legacy_get_input")),
+        );
+        self.set_prop(
+            regexp_id,
+            "$_",
+            Value::Builtin(b("RegExp", "legacy_get_input")),
+        );
+        self.set_prop(
+            regexp_id,
+            "lastMatch",
+            Value::Builtin(b("RegExp", "legacy_get_last_match")),
+        );
+        self.set_prop(
+            regexp_id,
+            "$&",
+            Value::Builtin(b("RegExp", "legacy_get_last_match")),
+        );
+        self.set_prop(
+            regexp_id,
+            "lastParen",
+            Value::Builtin(b("RegExp", "legacy_get_last_paren")),
+        );
+        self.set_prop(
+            regexp_id,
+            "$+",
+            Value::Builtin(b("RegExp", "legacy_get_last_paren")),
+        );
+        self.set_prop(
+            regexp_id,
+            "leftContext",
+            Value::Builtin(b("RegExp", "legacy_get_left_context")),
+        );
+        self.set_prop(
+            regexp_id,
+            "$`",
+            Value::Builtin(b("RegExp", "legacy_get_left_context")),
+        );
+        self.set_prop(
+            regexp_id,
+            "rightContext",
+            Value::Builtin(b("RegExp", "legacy_get_right_context")),
+        );
+        self.set_prop(
+            regexp_id,
+            "$'",
+            Value::Builtin(b("RegExp", "legacy_get_right_context")),
+        );
         self.set_prop(global_id, "RegExp", Value::Object(regexp_id));
 
         let map_id = self.alloc_object();
@@ -821,6 +986,7 @@ impl Heap {
         );
         let reflect_id = self.alloc_object();
         self.set_prop(reflect_id, "get", Value::Builtin(b("Reflect", "get")));
+        self.set_prop(reflect_id, "set", Value::Builtin(b("Reflect", "set")));
         self.set_prop(reflect_id, "apply", Value::Builtin(b("Reflect", "apply")));
         self.set_prop(
             reflect_id,
@@ -1398,7 +1564,11 @@ impl Heap {
                         self.get_prop(*id, "constructor")
                     {
                         if let crate::runtime::Value::String(s) = self.get_prop(ctor_id, "name") {
-                            if !s.is_empty() { s } else { String::new() }
+                            if !s.is_empty() {
+                                s
+                            } else {
+                                String::new()
+                            }
                         } else {
                             String::new()
                         }
@@ -1456,7 +1626,33 @@ impl Heap {
     pub fn object_keys(&self, obj_id: usize) -> Vec<String> {
         self.objects
             .get(obj_id)
-            .map(|o| o.props.keys().cloned().collect())
+            .map(|object| {
+                object
+                    .props
+                    .iter()
+                    .filter_map(|(key, value)| {
+                        if key.starts_with("__") || matches!(value, Value::Builtin(_)) {
+                            None
+                        } else {
+                            Some(key.clone())
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    pub fn object_property_names(&self, obj_id: usize) -> Vec<String> {
+        self.objects
+            .get(obj_id)
+            .map(|object| {
+                object
+                    .props
+                    .keys()
+                    .filter(|key| !key.starts_with("__"))
+                    .cloned()
+                    .collect()
+            })
             .unwrap_or_default()
     }
 

@@ -391,6 +391,7 @@ pub fn test262(
     all: bool,
     json_output: bool,
     limit: Option<usize>,
+    filter: Option<&str>,
 ) -> Result<(), CliError> {
     let cwd = std::env::current_dir().map_err(|e| CliError::Usage(e.to_string()))?;
     let allowlist_path = cwd.join("test262").join("allowlist.txt");
@@ -435,6 +436,9 @@ pub fn test262(
         (paths, by_path)
     };
     let mut test_paths = test_paths;
+    if let Some(pat) = filter {
+        test_paths.retain(|p| p.contains(pat));
+    }
     if let Some(n) = limit {
         test_paths.truncate(n);
     }

@@ -1,4 +1,4 @@
-use super::{BuiltinContext, BuiltinError, is_truthy, strict_eq, to_number};
+use super::{is_truthy, strict_eq, to_number, BuiltinContext, BuiltinError};
 use crate::runtime::{Heap, Value};
 
 pub fn push(args: &[Value], heap: &mut Heap) -> Value {
@@ -232,7 +232,11 @@ pub fn to_spliced(args: &[Value], heap: &mut Heap) -> Value {
                 0
             } else {
                 let k = n as i32;
-                if k < 0 { (len + k).max(0) } else { k.min(len) }
+                if k < 0 {
+                    (len + k).max(0)
+                } else {
+                    k.min(len)
+                }
             }
         })
         .unwrap_or(0)
@@ -319,7 +323,11 @@ pub fn slice(args: &[Value], heap: &mut Heap) -> Value {
         let start = start_val
             .map(|v| {
                 let n = to_number(v) as i32;
-                if n < 0 { (len + n).max(0) } else { n.min(len) }
+                if n < 0 {
+                    (len + n).max(0)
+                } else {
+                    n.min(len)
+                }
             })
             .unwrap_or(0) as usize;
         let end = end_val
@@ -329,7 +337,11 @@ pub fn slice(args: &[Value], heap: &mut Heap) -> Value {
                     len
                 } else {
                     let n = n as i32;
-                    if n < 0 { (len + n).max(0) } else { n.min(len) }
+                    if n < 0 {
+                        (len + n).max(0)
+                    } else {
+                        n.min(len)
+                    }
                 }
             })
             .unwrap_or(len) as usize;
@@ -475,7 +487,11 @@ fn last_index_of_impl(args: &[Value], heap: &Heap) -> Value {
                     len
                 } else {
                     let n = n as i32;
-                    if n < 0 { (len + n).max(0) } else { n.min(len) }
+                    if n < 0 {
+                        (len + n).max(0)
+                    } else {
+                        n.min(len)
+                    }
                 }
             })
             .unwrap_or(len.max(0));
@@ -496,7 +512,11 @@ fn last_index_of_impl(args: &[Value], heap: &Heap) -> Value {
                     len
                 } else {
                     let n = n as i32;
-                    if n < 0 { (len + n).max(0) } else { n.min(len) }
+                    if n < 0 {
+                        (len + n).max(0)
+                    } else {
+                        n.min(len)
+                    }
                 }
             })
             .unwrap_or(len.max(0));
@@ -868,7 +888,11 @@ pub fn copy_within(args: &[Value], heap: &mut Heap) -> Value {
                 0
             } else {
                 let i = n as i32;
-                if i < 0 { (len + i).max(0) } else { i.min(len) }
+                if i < 0 {
+                    (len + i).max(0)
+                } else {
+                    i.min(len)
+                }
             }
         })
         .unwrap_or(0) as usize;
@@ -880,7 +904,11 @@ pub fn copy_within(args: &[Value], heap: &mut Heap) -> Value {
                 0
             } else {
                 let i = n as i32;
-                if i < 0 { (len + i).max(0) } else { i.min(len) }
+                if i < 0 {
+                    (len + i).max(0)
+                } else {
+                    i.min(len)
+                }
             }
         })
         .unwrap_or(0) as usize;
@@ -892,7 +920,11 @@ pub fn copy_within(args: &[Value], heap: &mut Heap) -> Value {
                 len
             } else {
                 let i = n as i32;
-                if i < 0 { (len + i).max(0) } else { i.min(len) }
+                if i < 0 {
+                    (len + i).max(0)
+                } else {
+                    i.min(len)
+                }
             }
         })
         .unwrap_or(len) as usize;

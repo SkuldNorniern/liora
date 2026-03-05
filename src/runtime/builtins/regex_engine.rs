@@ -38,7 +38,11 @@ fn matches_escape(c: char, next: char, case_insensitive: bool) -> bool {
 }
 
 fn matches_dot(c: char, dot_all: bool) -> bool {
-    if c == '\n' { dot_all } else { true }
+    if c == '\n' {
+        dot_all
+    } else {
+        true
+    }
 }
 
 fn is_quantifier(c: u8) -> bool {
@@ -104,7 +108,11 @@ fn in_char_class(c: u8, ranges: &[(u8, u8)], negated: bool) -> bool {
             break;
         }
     }
-    if negated { !found } else { found }
+    if negated {
+        !found
+    } else {
+        found
+    }
 }
 
 fn char_in_class(c: char, ranges: &[(u8, u8)], negated: bool) -> bool {

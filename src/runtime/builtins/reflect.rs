@@ -1,6 +1,6 @@
 //! Reflect builtin stubs for test262. apply throws; get/construct implement [[Get]]/[[Construct]].
 
-use super::{BuiltinContext, BuiltinError, error, to_prop_key_with_heap};
+use super::{error, to_prop_key_with_heap, BuiltinContext, BuiltinError};
 use crate::runtime::Value;
 
 fn array_like_to_values(arr: &Value, heap: &crate::runtime::Heap) -> Vec<Value> {
@@ -39,6 +39,33 @@ fn builtin_prop_value(id: u8, key: &str) -> Option<Value> {
     }
 }
 
+fn legacy_regexp_getter_id(key: &str) -> Option<u8> {
+    match key {
+        "$1" => super::resolve("RegExp", "legacy_get_paren1"),
+        "$2" => super::resolve("RegExp", "legacy_get_paren2"),
+        "$3" => super::resolve("RegExp", "legacy_get_paren3"),
+        "$4" => super::resolve("RegExp", "legacy_get_paren4"),
+        "$5" => super::resolve("RegExp", "legacy_get_paren5"),
+        "$6" => super::resolve("RegExp", "legacy_get_paren6"),
+        "$7" => super::resolve("RegExp", "legacy_get_paren7"),
+        "$8" => super::resolve("RegExp", "legacy_get_paren8"),
+        "$9" => super::resolve("RegExp", "legacy_get_paren9"),
+        "input" | "$_" => super::resolve("RegExp", "legacy_get_input"),
+        "lastMatch" | "$&" => super::resolve("RegExp", "legacy_get_last_match"),
+        "lastParen" | "$+" => super::resolve("RegExp", "legacy_get_last_paren"),
+        "leftContext" | "$`" => super::resolve("RegExp", "legacy_get_left_context"),
+        "rightContext" | "$'" => super::resolve("RegExp", "legacy_get_right_context"),
+        _ => None,
+    }
+}
+
+fn legacy_regexp_setter_id(key: &str) -> Option<u8> {
+    match key {
+        "input" | "$_" => super::resolve("RegExp", "legacy_set_input"),
+        _ => None,
+    }
+}
+
 fn reflect_args(args: &[Value], min_count: usize) -> &[Value] {
     if args.len() > min_count {
         &args[1..]
@@ -65,22 +92,28 @@ pub fn reflect_get(args: &[Value], ctx: &mut BuiltinContext) -> Result<Value, Bu
             ctx.heap,
         ))
     })?;
-    let heap = &mut ctx.heap;
-    let key = to_prop_key_with_heap(key_val, heap);
-    let value = match target {
-        Value::Object(id) => heap.get_prop(*id, &key),
-        Value::Array(id) => heap.get_array_prop(*id, &key),
-        Value::Builtin(id) => builtin_prop_value(*id, &key).unwrap_or(Value::Undefined),
-        _ => {
-            return Err(BuiltinError::Throw(error::type_error(
-                &[Value::String(
-                    "Reflect.get: target must be an object".to_string(),
-                )],
-                heap,
-            )));
+    let key = to_prop_key_with_heap(key_val, ctx.heap);
+    let receiver = a.get(2).cloned().unwrap_or_else(|| target.clone());
+
+    match target {
+        Value::Object(id) => {
+            if let Some(getter_id) = legacy_regexp_getter_id(&key) {
+                let is_regexp_constructor = matches!(ctx.heap.get_global("RegExp"), Value::Object(regexp_id) if regexp_id == *id);
+                if is_regexp_constructor && ctx.heap.object_has_own_property(*id, &key) {
+                    return super::dispatch(getter_id, &[receiver], ctx);
+                }
+            }
+            Ok(ctx.heap.get_prop(*id, &key))
         }
-    };
-    Ok(value)
+        Value::Array(id) => Ok(ctx.heap.get_array_prop(*id, &key)),
+        Value::Builtin(id) => Ok(builtin_prop_value(*id, &key).unwrap_or(Value::Undefined)),
+        _ => Err(BuiltinError::Throw(error::type_error(
+            &[Value::String(
+                "Reflect.get: target must be an object".to_string(),
+            )],
+            ctx.heap,
+        ))),
+    }
 }
 
 pub fn reflect_apply(args: &[Value], ctx: &mut BuiltinContext) -> Result<Value, BuiltinError> {
@@ -207,6 +240,56 @@ pub fn reflect_construct(args: &[Value], ctx: &mut BuiltinContext) -> Result<Val
         _ => Err(BuiltinError::Throw(error::type_error(
             &[Value::String(
                 "Reflect.construct: target is not a constructor".to_string(),
+            )],
+            ctx.heap,
+        ))),
+    }
+}
+
+pub fn reflect_set(args: &[Value], ctx: &mut BuiltinContext) -> Result<Value, BuiltinError> {
+    let a = reflect_args(args, 3);
+    if a.len() < 3 {
+        return Err(BuiltinError::Throw(error::type_error(
+            &[Value::String(
+                "Reflect.set requires at least 3 arguments".to_string(),
+            )],
+            ctx.heap,
+        )));
+    }
+
+    let target = a[0].clone();
+    let key = to_prop_key_with_heap(&a[1], ctx.heap);
+    let value = a[2].clone();
+    let receiver = a.get(3).cloned().unwrap_or_else(|| target.clone());
+
+    match target {
+        Value::Object(id) => {
+            if let Some(getter_id) = legacy_regexp_getter_id(&key) {
+                let is_regexp_constructor = matches!(ctx.heap.get_global("RegExp"), Value::Object(regexp_id) if regexp_id == id);
+                if is_regexp_constructor && ctx.heap.object_has_own_property(id, &key) {
+                    if let Some(setter_id) = legacy_regexp_setter_id(&key) {
+                        let args = [receiver, value];
+                        super::dispatch(setter_id, &args, ctx)?;
+                        return Ok(Value::Bool(true));
+                    }
+                    let _ = getter_id;
+                    return Ok(Value::Bool(false));
+                }
+            }
+            ctx.heap.set_prop(id, &key, value);
+            Ok(Value::Bool(true))
+        }
+        Value::Array(id) => {
+            ctx.heap.set_array_prop(id, &key, value);
+            Ok(Value::Bool(true))
+        }
+        Value::Function(function_index) => {
+            ctx.heap.set_function_prop(function_index, &key, value);
+            Ok(Value::Bool(true))
+        }
+        _ => Err(BuiltinError::Throw(error::type_error(
+            &[Value::String(
+                "Reflect.set: target must be an object".to_string(),
             )],
             ctx.heap,
         ))),

@@ -1,7 +1,7 @@
 //! Function.prototype.call, bind, apply - required for propertyHelper and test262 harness.
 //! call invokes builtins with explicit this. apply supports Function, Builtin, DynamicFunction.
 
-use super::{BuiltinContext, BuiltinError, to_number};
+use super::{to_number, BuiltinContext, BuiltinError};
 use crate::runtime::{Heap, Value};
 
 fn is_callable_value(value: &Value, heap: &Heap) -> bool {
@@ -165,7 +165,7 @@ pub fn function_bind(args: &[Value], ctx: &mut BuiltinContext) -> Result<Value, 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::builtins::{BuiltinContext, resolve};
+    use crate::runtime::builtins::{resolve, BuiltinContext};
 
     #[test]
     fn bind_creates_bound_builtin_for_call_and_method() {

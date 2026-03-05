@@ -347,6 +347,57 @@ fn create_data_descriptor(
     Value::Object(descriptor_id)
 }
 
+fn create_accessor_descriptor(
+    getter: Value,
+    setter: Value,
+    enumerable: bool,
+    configurable: bool,
+    heap: &mut Heap,
+) -> Value {
+    let descriptor_id = heap.alloc_object();
+    heap.set_prop(descriptor_id, "get", getter);
+    heap.set_prop(descriptor_id, "set", setter);
+    heap.set_prop(descriptor_id, "enumerable", Value::Bool(enumerable));
+    heap.set_prop(descriptor_id, "configurable", Value::Bool(configurable));
+    Value::Object(descriptor_id)
+}
+
+fn is_regexp_constructor_object(object_id: usize, heap: &Heap) -> bool {
+    matches!(heap.get_global("RegExp"), Value::Object(regexp_id) if regexp_id == object_id)
+}
+
+fn regexp_legacy_accessor_ids(key: &str) -> Option<(u8, Option<u8>)> {
+    match key {
+        "$1" => builtins::resolve("RegExp", "legacy_get_paren1").map(|id| (id, None)),
+        "$2" => builtins::resolve("RegExp", "legacy_get_paren2").map(|id| (id, None)),
+        "$3" => builtins::resolve("RegExp", "legacy_get_paren3").map(|id| (id, None)),
+        "$4" => builtins::resolve("RegExp", "legacy_get_paren4").map(|id| (id, None)),
+        "$5" => builtins::resolve("RegExp", "legacy_get_paren5").map(|id| (id, None)),
+        "$6" => builtins::resolve("RegExp", "legacy_get_paren6").map(|id| (id, None)),
+        "$7" => builtins::resolve("RegExp", "legacy_get_paren7").map(|id| (id, None)),
+        "$8" => builtins::resolve("RegExp", "legacy_get_paren8").map(|id| (id, None)),
+        "$9" => builtins::resolve("RegExp", "legacy_get_paren9").map(|id| (id, None)),
+        "input" | "$_" => {
+            let getter_id = builtins::resolve("RegExp", "legacy_get_input")?;
+            let setter_id = builtins::resolve("RegExp", "legacy_set_input")?;
+            Some((getter_id, Some(setter_id)))
+        }
+        "lastMatch" | "$&" => {
+            builtins::resolve("RegExp", "legacy_get_last_match").map(|id| (id, None))
+        }
+        "lastParen" | "$+" => {
+            builtins::resolve("RegExp", "legacy_get_last_paren").map(|id| (id, None))
+        }
+        "leftContext" | "$`" => {
+            builtins::resolve("RegExp", "legacy_get_left_context").map(|id| (id, None))
+        }
+        "rightContext" | "$'" => {
+            builtins::resolve("RegExp", "legacy_get_right_context").map(|id| (id, None))
+        }
+        _ => None,
+    }
+}
+
 pub fn get_own_property_descriptor(args: &[Value], heap: &mut Heap) -> Value {
     let args = object_static_args(args, heap);
     let target = match args.first() {
@@ -359,6 +410,13 @@ pub fn get_own_property_descriptor(args: &[Value], heap: &mut Heap) -> Value {
         .unwrap_or_default();
     match target {
         Value::Object(id) => {
+            if is_regexp_constructor_object(*id, heap) && heap.object_has_own_property(*id, &key) {
+                if let Some((getter_id, setter_id)) = regexp_legacy_accessor_ids(&key) {
+                    let getter = Value::Builtin(getter_id);
+                    let setter = setter_id.map(Value::Builtin).unwrap_or(Value::Undefined);
+                    return create_accessor_descriptor(getter, setter, false, true, heap);
+                }
+            }
             if !heap.object_has_own_property(*id, &key) {
                 return Value::Undefined;
             }
@@ -421,7 +479,7 @@ pub fn get_own_property_names(args: &[Value], heap: &mut Heap) -> Value {
         None => return Value::Array(names_array_id),
     };
     let names: Vec<String> = match target {
-        Value::Object(id) => heap.object_keys(*id),
+        Value::Object(id) => heap.object_property_names(*id),
         Value::Function(function_index) => heap.function_keys(*function_index),
         Value::Array(id) => {
             let mut keys = Vec::new();

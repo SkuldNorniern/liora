@@ -2,6 +2,23 @@ use crate::runtime::builtins;
 use crate::runtime::builtins::regex_engine;
 use crate::runtime::{Heap, Value};
 
+use super::{error, BuiltinContext, BuiltinError};
+
+const LEGACY_PAREN_1_KEY: &str = "__legacy_regexp_paren1";
+const LEGACY_PAREN_2_KEY: &str = "__legacy_regexp_paren2";
+const LEGACY_PAREN_3_KEY: &str = "__legacy_regexp_paren3";
+const LEGACY_PAREN_4_KEY: &str = "__legacy_regexp_paren4";
+const LEGACY_PAREN_5_KEY: &str = "__legacy_regexp_paren5";
+const LEGACY_PAREN_6_KEY: &str = "__legacy_regexp_paren6";
+const LEGACY_PAREN_7_KEY: &str = "__legacy_regexp_paren7";
+const LEGACY_PAREN_8_KEY: &str = "__legacy_regexp_paren8";
+const LEGACY_PAREN_9_KEY: &str = "__legacy_regexp_paren9";
+const LEGACY_INPUT_KEY: &str = "__legacy_regexp_input";
+const LEGACY_LAST_MATCH_KEY: &str = "__legacy_regexp_last_match";
+const LEGACY_LAST_PAREN_KEY: &str = "__legacy_regexp_last_paren";
+const LEGACY_LEFT_CONTEXT_KEY: &str = "__legacy_regexp_left_context";
+const LEGACY_RIGHT_CONTEXT_KEY: &str = "__legacy_regexp_right_context";
+
 fn reg_exp_test_id() -> u8 {
     builtins::resolve("RegExp", "test").expect("RegExp.test builtin")
 }
@@ -24,6 +41,112 @@ pub fn create(args: &[Value], heap: &mut Heap) -> Value {
     heap.set_prop(obj_id, "__regexp_pattern", Value::String(pattern));
     heap.set_prop(obj_id, "__regexp_flags", Value::String(flags));
     Value::Object(obj_id)
+}
+
+fn regexp_constructor_id(heap: &Heap) -> Option<usize> {
+    match heap.get_global("RegExp") {
+        Value::Object(id) => Some(id),
+        _ => None,
+    }
+}
+
+fn ensure_legacy_receiver(receiver: &Value, heap: &mut Heap) -> Result<usize, BuiltinError> {
+    let expected_id = regexp_constructor_id(heap);
+    match (receiver, expected_id) {
+        (Value::Object(receiver_id), Some(regexp_id)) if *receiver_id == regexp_id => Ok(regexp_id),
+        _ => Err(BuiltinError::Throw(error::type_error(
+            &[Value::String(
+                "RegExp legacy accessor receiver must be RegExp".to_string(),
+            )],
+            heap,
+        ))),
+    }
+}
+
+fn legacy_get_slot(args: &[Value], slot_key: &str, heap: &mut Heap) -> Result<Value, BuiltinError> {
+    let receiver = args.first().cloned().unwrap_or(Value::Undefined);
+    let regexp_id = ensure_legacy_receiver(&receiver, heap)?;
+    Ok(heap.get_prop(regexp_id, slot_key))
+}
+
+fn legacy_set_slot(args: &[Value], slot_key: &str, heap: &mut Heap) -> Result<Value, BuiltinError> {
+    let receiver = args.first().cloned().unwrap_or(Value::Undefined);
+    let regexp_id = ensure_legacy_receiver(&receiver, heap)?;
+    let new_value = args.get(1).cloned().unwrap_or(Value::Undefined);
+    heap.set_prop(regexp_id, slot_key, Value::String(new_value.to_string()));
+    Ok(Value::Undefined)
+}
+
+pub fn legacy_get_paren1(args: &[Value], ctx: &mut BuiltinContext) -> Result<Value, BuiltinError> {
+    legacy_get_slot(args, LEGACY_PAREN_1_KEY, ctx.heap)
+}
+
+pub fn legacy_get_paren2(args: &[Value], ctx: &mut BuiltinContext) -> Result<Value, BuiltinError> {
+    legacy_get_slot(args, LEGACY_PAREN_2_KEY, ctx.heap)
+}
+
+pub fn legacy_get_paren3(args: &[Value], ctx: &mut BuiltinContext) -> Result<Value, BuiltinError> {
+    legacy_get_slot(args, LEGACY_PAREN_3_KEY, ctx.heap)
+}
+
+pub fn legacy_get_paren4(args: &[Value], ctx: &mut BuiltinContext) -> Result<Value, BuiltinError> {
+    legacy_get_slot(args, LEGACY_PAREN_4_KEY, ctx.heap)
+}
+
+pub fn legacy_get_paren5(args: &[Value], ctx: &mut BuiltinContext) -> Result<Value, BuiltinError> {
+    legacy_get_slot(args, LEGACY_PAREN_5_KEY, ctx.heap)
+}
+
+pub fn legacy_get_paren6(args: &[Value], ctx: &mut BuiltinContext) -> Result<Value, BuiltinError> {
+    legacy_get_slot(args, LEGACY_PAREN_6_KEY, ctx.heap)
+}
+
+pub fn legacy_get_paren7(args: &[Value], ctx: &mut BuiltinContext) -> Result<Value, BuiltinError> {
+    legacy_get_slot(args, LEGACY_PAREN_7_KEY, ctx.heap)
+}
+
+pub fn legacy_get_paren8(args: &[Value], ctx: &mut BuiltinContext) -> Result<Value, BuiltinError> {
+    legacy_get_slot(args, LEGACY_PAREN_8_KEY, ctx.heap)
+}
+
+pub fn legacy_get_paren9(args: &[Value], ctx: &mut BuiltinContext) -> Result<Value, BuiltinError> {
+    legacy_get_slot(args, LEGACY_PAREN_9_KEY, ctx.heap)
+}
+
+pub fn legacy_get_input(args: &[Value], ctx: &mut BuiltinContext) -> Result<Value, BuiltinError> {
+    legacy_get_slot(args, LEGACY_INPUT_KEY, ctx.heap)
+}
+
+pub fn legacy_set_input(args: &[Value], ctx: &mut BuiltinContext) -> Result<Value, BuiltinError> {
+    legacy_set_slot(args, LEGACY_INPUT_KEY, ctx.heap)
+}
+
+pub fn legacy_get_last_match(
+    args: &[Value],
+    ctx: &mut BuiltinContext,
+) -> Result<Value, BuiltinError> {
+    legacy_get_slot(args, LEGACY_LAST_MATCH_KEY, ctx.heap)
+}
+
+pub fn legacy_get_last_paren(
+    args: &[Value],
+    ctx: &mut BuiltinContext,
+) -> Result<Value, BuiltinError> {
+    legacy_get_slot(args, LEGACY_LAST_PAREN_KEY, ctx.heap)
+}
+
+pub fn legacy_get_left_context(
+    args: &[Value],
+    ctx: &mut BuiltinContext,
+) -> Result<Value, BuiltinError> {
+    legacy_get_slot(args, LEGACY_LEFT_CONTEXT_KEY, ctx.heap)
+}
+
+pub fn legacy_get_right_context(
+    args: &[Value],
+    ctx: &mut BuiltinContext,
+) -> Result<Value, BuiltinError> {
+    legacy_get_slot(args, LEGACY_RIGHT_CONTEXT_KEY, ctx.heap)
 }
 
 pub fn exec(args: &[Value], heap: &mut Heap) -> Value {

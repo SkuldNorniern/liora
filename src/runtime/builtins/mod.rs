@@ -875,6 +875,81 @@ const BUILTINS: &[BuiltinDef] = &[
         name: "symbol_split",
         entry: BuiltinEntry::Normal(regexp::symbol_split),
     },
+    BuiltinDef {
+        category: "RegExp",
+        name: "legacy_get_paren1",
+        entry: BuiltinEntry::Throwing(regexp::legacy_get_paren1),
+    },
+    BuiltinDef {
+        category: "RegExp",
+        name: "legacy_get_paren2",
+        entry: BuiltinEntry::Throwing(regexp::legacy_get_paren2),
+    },
+    BuiltinDef {
+        category: "RegExp",
+        name: "legacy_get_paren3",
+        entry: BuiltinEntry::Throwing(regexp::legacy_get_paren3),
+    },
+    BuiltinDef {
+        category: "RegExp",
+        name: "legacy_get_paren4",
+        entry: BuiltinEntry::Throwing(regexp::legacy_get_paren4),
+    },
+    BuiltinDef {
+        category: "RegExp",
+        name: "legacy_get_paren5",
+        entry: BuiltinEntry::Throwing(regexp::legacy_get_paren5),
+    },
+    BuiltinDef {
+        category: "RegExp",
+        name: "legacy_get_paren6",
+        entry: BuiltinEntry::Throwing(regexp::legacy_get_paren6),
+    },
+    BuiltinDef {
+        category: "RegExp",
+        name: "legacy_get_paren7",
+        entry: BuiltinEntry::Throwing(regexp::legacy_get_paren7),
+    },
+    BuiltinDef {
+        category: "RegExp",
+        name: "legacy_get_paren8",
+        entry: BuiltinEntry::Throwing(regexp::legacy_get_paren8),
+    },
+    BuiltinDef {
+        category: "RegExp",
+        name: "legacy_get_paren9",
+        entry: BuiltinEntry::Throwing(regexp::legacy_get_paren9),
+    },
+    BuiltinDef {
+        category: "RegExp",
+        name: "legacy_get_input",
+        entry: BuiltinEntry::Throwing(regexp::legacy_get_input),
+    },
+    BuiltinDef {
+        category: "RegExp",
+        name: "legacy_set_input",
+        entry: BuiltinEntry::Throwing(regexp::legacy_set_input),
+    },
+    BuiltinDef {
+        category: "RegExp",
+        name: "legacy_get_last_match",
+        entry: BuiltinEntry::Throwing(regexp::legacy_get_last_match),
+    },
+    BuiltinDef {
+        category: "RegExp",
+        name: "legacy_get_last_paren",
+        entry: BuiltinEntry::Throwing(regexp::legacy_get_last_paren),
+    },
+    BuiltinDef {
+        category: "RegExp",
+        name: "legacy_get_left_context",
+        entry: BuiltinEntry::Throwing(regexp::legacy_get_left_context),
+    },
+    BuiltinDef {
+        category: "RegExp",
+        name: "legacy_get_right_context",
+        entry: BuiltinEntry::Throwing(regexp::legacy_get_right_context),
+    },
     // Map 0..3
     BuiltinDef {
         category: "Map",
@@ -1187,6 +1262,11 @@ const BUILTINS: &[BuiltinDef] = &[
     },
     BuiltinDef {
         category: "Reflect",
+        name: "set",
+        entry: BuiltinEntry::Throwing(reflect::reflect_set),
+    },
+    BuiltinDef {
+        category: "Reflect",
         name: "apply",
         entry: BuiltinEntry::Throwing(reflect::reflect_apply),
     },
@@ -1390,6 +1470,9 @@ pub fn length(id: u8) -> i32 {
             ("Date", "setYear") => 1,
             ("Array", "includes") | ("Array", "indexOf") | ("Array", "lastIndexOf") => 1,
             ("RegExp", "compile") => 2,
+            ("Reflect", "get") | ("Reflect", "has") | ("Reflect", "deleteProperty") => 2,
+            ("Reflect", "set") | ("Reflect", "apply") | ("Reflect", "defineProperty") => 3,
+            ("Reflect", "construct") => 2,
             ("Global", "escape") | ("Global", "unescape") => 1,
             _ => 0,
         })

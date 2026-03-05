@@ -5,13 +5,13 @@ use crate::runtime::builtins;
 use crate::runtime::{Heap, Value};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use super::calls::{execute_builtin, pop_args, read_i16, read_u8, read_u16, setup_callee_locals};
+use super::calls::{execute_builtin, pop_args, read_i16, read_u16, read_u8, setup_callee_locals};
 use super::ops::{
     add_values, div_values, gt_values, gte_values, in_check, instanceof_check, is_nullish,
     is_truthy, loose_eq, lt_values, lte_values, mod_values, mul_values, pow_values, strict_eq,
     sub_values, value_to_prop_key, value_to_prop_key_with_heap,
 };
-use super::props::{GetPropCache, resolve_get_prop};
+use super::props::{resolve_get_prop, GetPropCache};
 use super::tiering::{JitTiering, JitTieringStats};
 use super::types::{BuiltinResult, Completion, Program, VmError};
 
@@ -354,11 +354,13 @@ pub fn interpret_program_with_heap_and_entry(
                 .chunks_stack
                 .get(chunk_index)
                 .ok_or(VmError::InvalidConstIndex(chunk_index))?
+                .clone()
         } else {
             program
                 .chunks
                 .get(chunk_index)
                 .ok_or(VmError::InvalidConstIndex(chunk_index))?
+                .clone()
         };
         let code = &chunk.code;
         let constants = &chunk.constants;
@@ -803,7 +805,7 @@ pub fn interpret_program_with_heap_and_entry(
             0x21 => {
                 let val = state.stack.pop().ok_or_else(underflow)?;
                 let throw_pc = trace_pc;
-                if let Some((hpc, slot, is_fin)) = find_handler(chunk, throw_pc) {
+                if let Some((hpc, slot, is_fin)) = find_handler(&chunk, throw_pc) {
                     state.throw_into_handler_slot(slot, val.clone(), is_fin, hpc);
                     pc = hpc;
                 } else {
@@ -994,12 +996,12 @@ pub fn interpret_program_with_heap_and_entry(
                         state.stack.push(v);
                     }
                     Ok(BuiltinResult::Throw(v)) => {
-                        if let Some((hpc, slot, is_fin)) = find_handler(chunk, call_pc) {
-                            state.throw_into_handler_slot(slot, v.clone(), is_fin, hpc);
-                            pc = hpc;
-                        } else {
-                            return Ok(Completion::Throw(v));
+                        if let Some(completion) =
+                            propagate_call_throw(program, &mut state, &chunk, call_pc, v)?
+                        {
+                            return Ok(completion);
                         }
+                        continue;
                     }
                     Ok(BuiltinResult::Invoke {
                         callee,
@@ -1068,12 +1070,12 @@ pub fn interpret_program_with_heap_and_entry(
                                 state.stack.push(v);
                             }
                             Ok(BuiltinResult::Throw(v)) => {
-                                if let Some((hpc, slot, is_fin)) = find_handler(chunk, call_pc) {
-                                    state.throw_into_handler_slot(slot, v.clone(), is_fin, hpc);
-                                    pc = hpc;
-                                } else {
-                                    return Ok(Completion::Throw(v));
+                                if let Some(completion) =
+                                    propagate_call_throw(program, &mut state, &chunk, call_pc, v)?
+                                {
+                                    return Ok(completion);
                                 }
+                                continue;
                             }
                             Ok(BuiltinResult::Invoke {
                                 callee,
@@ -1216,12 +1218,12 @@ pub fn interpret_program_with_heap_and_entry(
                                 state.stack.push(v);
                             }
                             Ok(BuiltinResult::Throw(v)) => {
-                                if let Some((hpc, slot, is_fin)) = find_handler(chunk, call_pc) {
-                                    state.throw_into_handler_slot(slot, v.clone(), is_fin, hpc);
-                                    pc = hpc;
-                                } else {
-                                    return Ok(Completion::Throw(v));
+                                if let Some(completion) =
+                                    propagate_call_throw(program, &mut state, &chunk, call_pc, v)?
+                                {
+                                    return Ok(completion);
                                 }
+                                continue;
                             }
                             Ok(BuiltinResult::Invoke {
                                 callee,
@@ -1268,13 +1270,12 @@ pub fn interpret_program_with_heap_and_entry(
                                     state.stack.push(v);
                                 }
                                 Ok(BuiltinResult::Throw(v)) => {
-                                    if let Some((hpc, slot, is_fin)) = find_handler(chunk, call_pc)
-                                    {
-                                        state.throw_into_handler_slot(slot, v.clone(), is_fin, hpc);
-                                        pc = hpc;
-                                    } else {
-                                        return Ok(Completion::Throw(v));
+                                    if let Some(completion) = propagate_call_throw(
+                                        program, &mut state, &chunk, call_pc, v,
+                                    )? {
+                                        return Ok(completion);
                                     }
+                                    continue;
                                 }
                                 Ok(BuiltinResult::Invoke {
                                     callee,
@@ -1395,7 +1396,12 @@ pub fn interpret_program_with_heap_and_entry(
                                 state.stack.push(v);
                             }
                             Ok(BuiltinResult::Throw(v)) => {
-                                return Ok(Completion::Throw(v));
+                                if let Some(completion) =
+                                    propagate_call_throw(program, &mut state, &chunk, trace_pc, v)?
+                                {
+                                    return Ok(completion);
+                                }
+                                continue;
                             }
                             Ok(BuiltinResult::Invoke {
                                 callee,
@@ -1502,18 +1508,36 @@ pub fn interpret_program_with_heap_and_entry(
                     Value::Object(obj_id_callee) => {
                         if let Value::Builtin(builtin_id) = heap.get_prop(obj_id_callee, "__call__")
                         {
-                            state.stack.push(receiver);
+                            state.stack.push(receiver.clone());
                             for a in &args {
                                 state.stack.push(a.clone());
                             }
                             let mut ctx = builtins::BuiltinContext { heap };
                             match execute_builtin(builtin_id, argc + 1, &mut state.stack, &mut ctx)
                             {
-                                Ok(BuiltinResult::Push(_)) => {
+                                Ok(BuiltinResult::Push(v)) => {
                                     state.getprop_cache.invalidate_all();
+                                    let constructed = if matches!(
+                                        v,
+                                        Value::Object(_)
+                                            | Value::Array(_)
+                                            | Value::Map(_)
+                                            | Value::Set(_)
+                                            | Value::Date(_)
+                                    ) {
+                                        v
+                                    } else {
+                                        receiver.clone()
+                                    };
+                                    state.stack.push(constructed);
                                 }
                                 Ok(BuiltinResult::Throw(v)) => {
-                                    return Ok(Completion::Throw(v));
+                                    if let Some(completion) = propagate_call_throw(
+                                        program, &mut state, &chunk, trace_pc, v,
+                                    )? {
+                                        return Ok(completion);
+                                    }
+                                    continue;
                                 }
                                 Ok(BuiltinResult::Invoke {
                                     callee,
@@ -1791,7 +1815,7 @@ pub fn interpret_program_with_heap_and_entry(
                             }
                             crate::runtime::PromiseState::Rejected(err) => {
                                 let throw_pc = trace_pc;
-                                if let Some((hpc, slot, is_fin)) = find_handler(chunk, throw_pc) {
+                                if let Some((hpc, slot, is_fin)) = find_handler(&chunk, throw_pc) {
                                     state.throw_into_handler_slot(slot, err.clone(), is_fin, hpc);
                                     pc = hpc;
                                 } else {
@@ -1820,6 +1844,64 @@ pub fn interpret_program_with_heap_and_entry(
     Ok(Completion::Normal(result))
 }
 
+fn propagate_call_throw(
+    program: &Program,
+    state: &mut RunState,
+    current_chunk: &BytecodeChunk,
+    throw_pc: usize,
+    thrown_value: Value,
+) -> Result<Option<Completion>, VmError> {
+    if let Some((handler_pc, slot, is_finally)) = find_handler(current_chunk, throw_pc) {
+        state.throw_into_handler_slot(slot, thrown_value, is_finally, handler_pc);
+        return Ok(None);
+    }
+
+    let uncaught_value = thrown_value;
+    loop {
+        let popped_frame = state.frames.pop();
+        if let Some(frame) = popped_frame.as_ref() {
+            if frame.is_dynamic {
+                state.chunks_stack.pop();
+            }
+            state.stack.truncate(frame.stack_base);
+        }
+
+        if popped_frame.is_none() || state.frames.is_empty() {
+            return Ok(Some(Completion::Throw(uncaught_value)));
+        }
+
+        let caller_index = state.frames.len() - 1;
+        let (caller_chunk_index, caller_is_dynamic, caller_pc, stack_base, num_locals) = {
+            let frame = &state.frames[caller_index];
+            (
+                frame.chunk_index,
+                frame.is_dynamic,
+                frame.pc,
+                frame.stack_base,
+                frame.num_locals,
+            )
+        };
+        let caller_chunk = if caller_is_dynamic {
+            state
+                .chunks_stack
+                .get(caller_chunk_index)
+                .ok_or(VmError::InvalidConstIndex(caller_chunk_index))?
+        } else {
+            program
+                .chunks
+                .get(caller_chunk_index)
+                .ok_or(VmError::InvalidConstIndex(caller_chunk_index))?
+        };
+
+        if let Some((handler_pc, slot, is_finally)) = find_handler(caller_chunk, caller_pc) {
+            state.set_local_at(stack_base, num_locals, slot, uncaught_value.clone());
+            state.frames[caller_index].rethrow_after_finally = is_finally;
+            state.frames[caller_index].pc = handler_pc;
+            return Ok(None);
+        }
+    }
+}
+
 /// Finds the innermost exception handler covering `throw_pc`.
 fn handle_apply_invoke(
     program: &Program,
@@ -1838,11 +1920,13 @@ fn handle_apply_invoke(
             .chunks_stack
             .get(chunk_index)
             .ok_or(VmError::InvalidConstIndex(chunk_index))?
+            .clone()
     } else {
         program
             .chunks
             .get(chunk_index)
             .ok_or(VmError::InvalidConstIndex(chunk_index))?
+            .clone()
     };
     loop {
         let bind_unwrap = match &callee {
@@ -1873,11 +1957,12 @@ fn handle_apply_invoke(
                         return Ok(None);
                     }
                     Ok(BuiltinResult::Throw(v)) => {
-                        if let Some((hpc, slot, is_fin)) = find_handler(chunk, call_pc) {
-                            state.throw_into_handler_slot(slot, v.clone(), is_fin, hpc);
-                            return Ok(None);
+                        if let Some(completion) =
+                            propagate_call_throw(program, state, &chunk, call_pc, v)?
+                        {
+                            return Ok(Some(completion));
                         }
-                        return Ok(Some(Completion::Throw(v)));
+                        return Ok(None);
                     }
                     Ok(BuiltinResult::Invoke {
                         callee: c,
@@ -2009,11 +2094,12 @@ fn handle_apply_invoke(
                         return Ok(None);
                     }
                     Ok(BuiltinResult::Throw(v)) => {
-                        if let Some((hpc, slot, is_fin)) = find_handler(chunk, call_pc) {
-                            state.throw_into_handler_slot(slot, v.clone(), is_fin, hpc);
-                            return Ok(None);
+                        if let Some(completion) =
+                            propagate_call_throw(program, state, &chunk, call_pc, v)?
+                        {
+                            return Ok(Some(completion));
                         }
-                        return Ok(Some(Completion::Throw(v)));
+                        return Ok(None);
                     }
                     Ok(BuiltinResult::Invoke {
                         callee: c,
@@ -2047,17 +2133,12 @@ fn handle_apply_invoke(
                             return Ok(None);
                         }
                         Ok(BuiltinResult::Throw(v)) => {
-                            if let Some((hpc, slot, is_fin)) = find_handler(chunk, call_pc) {
-                                if let Some(f) = state.frames.last() {
-                                    state.set_local_at(f.stack_base, f.num_locals, slot, v.clone());
-                                }
-                                if let Some(f) = state.frames.last_mut() {
-                                    f.rethrow_after_finally = is_fin;
-                                    f.pc = hpc;
-                                }
-                                return Ok(None);
+                            if let Some(completion) =
+                                propagate_call_throw(program, state, &chunk, call_pc, v)?
+                            {
+                                return Ok(Some(completion));
                             }
-                            return Ok(Some(Completion::Throw(v)));
+                            return Ok(None);
                         }
                         Ok(BuiltinResult::Invoke {
                             callee: c,
@@ -2081,7 +2162,12 @@ fn handle_apply_invoke(
                     return Ok(None);
                 } else {
                     let msg = "TypeError: callee is not a function (got object)".to_string();
-                    return Ok(Some(Completion::Throw(Value::String(msg))));
+                    if let Some(completion) =
+                        propagate_call_throw(program, state, &chunk, call_pc, Value::String(msg))?
+                    {
+                        return Ok(Some(completion));
+                    }
+                    return Ok(None);
                 }
             }
             _ => {
@@ -2089,7 +2175,12 @@ fn handle_apply_invoke(
                     "TypeError: callee is not a function (got {})",
                     callee.type_name_for_error(),
                 );
-                return Ok(Some(Completion::Throw(Value::String(msg))));
+                if let Some(completion) =
+                    propagate_call_throw(program, state, &chunk, call_pc, Value::String(msg))?
+                {
+                    return Ok(Some(completion));
+                }
+                return Ok(None);
             }
         }
     }
