@@ -57,6 +57,7 @@ pub struct Heap {
     sets: Vec<std::collections::HashSet<String>>,
     dates: Vec<f64>,
     symbols: Vec<Option<String>>,
+    symbol_for_registry: HashMap<String, usize>,
     error_object_ids: HashSet<usize>,
     global_object_id: usize,
     array_prototype_id: Option<usize>,
@@ -87,6 +88,7 @@ impl Default for Heap {
             sets: Vec::new(),
             dates: Vec::new(),
             symbols: Vec::new(),
+            symbol_for_registry: HashMap::new(),
             error_object_ids: HashSet::new(),
             global_object_id: 0,
             array_prototype_id: None,
@@ -367,7 +369,7 @@ impl Heap {
         self.set_prop(
             str_proto_id,
             "replaceAll",
-            Value::Builtin(b("String", "replace")),
+            Value::Builtin(b("String", "replaceAll")),
         );
         self.set_prop(str_proto_id, "trim", Value::Builtin(b("String", "trim")));
         self.set_prop(
@@ -471,7 +473,17 @@ impl Heap {
         );
         self.set_prop(
             str_proto_id,
+            "trimStart",
+            Value::Builtin(b("String", "trimLeft")),
+        );
+        self.set_prop(
+            str_proto_id,
             "trimRight",
+            Value::Builtin(b("String", "trimRight")),
+        );
+        self.set_prop(
+            str_proto_id,
+            "trimEnd",
             Value::Builtin(b("String", "trimRight")),
         );
         let str_id = self.alloc_object();
@@ -685,6 +697,8 @@ impl Heap {
         let sym_to_string_tag = self.alloc_symbol(Some("Symbol.toStringTag".to_string()));
         let symbol_id = self.alloc_object();
         self.set_prop(symbol_id, "__call__", Value::Builtin(b("Symbol", "create")));
+        self.set_prop(symbol_id, "for", Value::Builtin(b("Symbol", "for")));
+        self.set_prop(symbol_id, "keyFor", Value::Builtin(b("Symbol", "keyFor")));
         self.set_prop(symbol_id, "match", Value::Symbol(sym_match));
         self.set_prop(symbol_id, "replace", Value::Symbol(sym_replace));
         self.set_prop(symbol_id, "search", Value::Symbol(sym_search));
@@ -803,6 +817,17 @@ impl Heap {
             "construct",
             Value::Builtin(b("Reflect", "construct")),
         );
+        self.set_prop(
+            reflect_id,
+            "defineProperty",
+            Value::Builtin(b("Reflect", "defineProperty")),
+        );
+        self.set_prop(reflect_id, "has", Value::Builtin(b("Reflect", "has")));
+        self.set_prop(
+            reflect_id,
+            "deleteProperty",
+            Value::Builtin(b("Reflect", "deleteProperty")),
+        );
         self.set_prop(global_id, "Reflect", Value::Object(reflect_id));
         let weakmap_id = self.alloc_object();
         self.set_prop(global_id, "WeakMap", Value::Object(weakmap_id));
@@ -817,7 +842,8 @@ impl Heap {
         );
     }
 
-    /// Node-compat globals (require, process). Opt-in via --compat. Stubs only.
+    /// Node-compat globals (require, process, module, exports, global, self, __dirname, __filename).
+    /// Opt-in via --compat. Stubs only; no real module resolution.
     pub fn init_compat_globals(&mut self) {
         let global_id = self.global_object_id;
         let require_builtin = builtins::resolve("Compat", "require").expect("Compat.require");
@@ -826,6 +852,15 @@ impl Heap {
         let env_id = self.alloc_object();
         self.set_prop(process_id, "env", Value::Object(env_id));
         self.set_prop(global_id, "process", Value::Object(process_id));
+        self.set_prop(global_id, "global", Value::Object(global_id));
+        self.set_prop(global_id, "self", Value::Object(global_id));
+        let exports_id = self.alloc_object();
+        let module_id = self.alloc_object();
+        self.set_prop(module_id, "exports", Value::Object(exports_id));
+        self.set_prop(global_id, "module", Value::Object(module_id));
+        self.set_prop(global_id, "exports", Value::Object(exports_id));
+        self.set_prop(global_id, "__dirname", Value::String(".".to_string()));
+        self.set_prop(global_id, "__filename", Value::String("script.js".to_string()));
     }
 
     /// Add $262 host object for test262 harness. Match V8/Bun/Deno: $262 only exists when running via test262.
@@ -983,6 +1018,22 @@ impl Heap {
         id
     }
 
+    pub fn symbol_for(&mut self, key: &str) -> usize {
+        if let Some(&id) = self.symbol_for_registry.get(key) {
+            return id;
+        }
+        let id = self.alloc_symbol(Some(key.to_string()));
+        self.symbol_for_registry.insert(key.to_string(), id);
+        id
+    }
+
+    pub fn symbol_key_for(&self, symbol_id: usize) -> Option<&str> {
+        self.symbol_for_registry
+            .iter()
+            .find(|(_, v)| **v == symbol_id)
+            .map(|(k, _)| k.as_str())
+    }
+
     pub fn alloc_symbol(&mut self, description: Option<String>) -> usize {
         let id = self.symbols.len();
         self.symbols.push(description);
@@ -1023,6 +1074,13 @@ impl Heap {
         self.maps.get(map_id).map(|m| m.len()).unwrap_or(0)
     }
 
+    pub fn map_keys(&self, map_id: usize) -> Vec<String> {
+        self.maps
+            .get(map_id)
+            .map(|m| m.keys().cloned().collect())
+            .unwrap_or_default()
+    }
+
     pub fn alloc_set(&mut self) -> usize {
         let id = self.sets.len();
         self.sets.push(std::collections::HashSet::new());
@@ -1044,6 +1102,13 @@ impl Heap {
 
     pub fn set_size(&self, set_id: usize) -> usize {
         self.sets.get(set_id).map(|s| s.len()).unwrap_or(0)
+    }
+
+    pub fn set_keys(&self, set_id: usize) -> Vec<String> {
+        self.sets
+            .get(set_id)
+            .map(|s| s.iter().cloned().collect())
+            .unwrap_or_default()
     }
 
     pub fn alloc_date(&mut self, timestamp_ms: f64) -> usize {
@@ -1118,9 +1183,11 @@ impl Heap {
         }
     }
 
-    pub fn delete_prop(&mut self, obj_id: usize, key: &str) {
+    pub fn delete_prop(&mut self, obj_id: usize, key: &str) -> bool {
         if let Some(obj) = self.objects.get_mut(obj_id) {
-            obj.props.remove(key);
+            obj.props.remove(key).is_some()
+        } else {
+            false
         }
     }
 

@@ -376,7 +376,8 @@ pub fn get_own_property_descriptor(args: &[Value], heap: &mut Heap) -> Value {
 
 pub fn get_own_property_names(args: &[Value], heap: &mut Heap) -> Value {
     let names_array_id = heap.alloc_array();
-    let target = match args.first() {
+    let target = args.first();
+    let target = match target {
         Some(value) => value,
         None => return Value::Array(names_array_id),
     };

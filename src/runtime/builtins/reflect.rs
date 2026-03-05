@@ -39,8 +39,17 @@ fn builtin_prop_value(id: u8, key: &str) -> Option<Value> {
     }
 }
 
+fn reflect_args(args: &[Value], min_count: usize) -> &[Value] {
+    if args.len() > min_count {
+        &args[1..]
+    } else {
+        args
+    }
+}
+
 pub fn reflect_get(args: &[Value], ctx: &mut BuiltinContext) -> Result<Value, BuiltinError> {
-    let target = args.first().ok_or_else(|| {
+    let a = reflect_args(args, 2);
+    let target = a.first().ok_or_else(|| {
         BuiltinError::Throw(error::type_error(
             &[Value::String(
                 "Reflect.get requires at least 2 arguments".to_string(),
@@ -48,7 +57,7 @@ pub fn reflect_get(args: &[Value], ctx: &mut BuiltinContext) -> Result<Value, Bu
             ctx.heap,
         ))
     })?;
-    let key_val = args.get(1).ok_or_else(|| {
+    let key_val = a.get(1).ok_or_else(|| {
         BuiltinError::Throw(error::type_error(
             &[Value::String(
                 "Reflect.get requires at least 2 arguments".to_string(),
@@ -75,7 +84,8 @@ pub fn reflect_get(args: &[Value], ctx: &mut BuiltinContext) -> Result<Value, Bu
 }
 
 pub fn reflect_apply(args: &[Value], ctx: &mut BuiltinContext) -> Result<Value, BuiltinError> {
-    if args.len() < 3 {
+    let a = reflect_args(args, 3);
+    if a.len() < 3 {
         return Err(BuiltinError::Throw(error::type_error(
             &[Value::String(
                 "Reflect.apply requires 3 arguments (target, thisArgument, argumentsList)"
@@ -84,11 +94,9 @@ pub fn reflect_apply(args: &[Value], ctx: &mut BuiltinContext) -> Result<Value, 
             ctx.heap,
         )));
     }
-    let (target, this_arg, args_array) = if args.len() >= 4 {
-        (args[1].clone(), args[2].clone(), args[3].clone())
-    } else {
-        (args[0].clone(), args[1].clone(), args[2].clone())
-    };
+    let target = a[0].clone();
+    let this_arg = a[1].clone();
+    let args_array = a[2].clone();
     let is_callable = matches!(
         &target,
         Value::Function(_)
@@ -120,7 +128,8 @@ pub fn reflect_apply(args: &[Value], ctx: &mut BuiltinContext) -> Result<Value, 
 }
 
 pub fn reflect_construct(args: &[Value], ctx: &mut BuiltinContext) -> Result<Value, BuiltinError> {
-    let target = args.first().ok_or_else(|| {
+    let a = reflect_args(args, 2);
+    let target = a.first().ok_or_else(|| {
         BuiltinError::Throw(error::type_error(
             &[Value::String(
                 "Reflect.construct requires at least 2 arguments".to_string(),
@@ -128,7 +137,7 @@ pub fn reflect_construct(args: &[Value], ctx: &mut BuiltinContext) -> Result<Val
             ctx.heap,
         ))
     })?;
-    let args_array = args.get(1).cloned().unwrap_or(Value::Undefined);
+    let args_array = a.get(1).cloned().unwrap_or(Value::Undefined);
     let construct_args = if matches!(args_array, Value::Null | Value::Undefined) {
         vec![]
     } else {
@@ -202,6 +211,59 @@ pub fn reflect_construct(args: &[Value], ctx: &mut BuiltinContext) -> Result<Val
             ctx.heap,
         ))),
     }
+}
+
+pub fn reflect_define_property(args: &[Value], ctx: &mut BuiltinContext) -> Result<Value, BuiltinError> {
+    let a = reflect_args(args, 3);
+    if a.len() < 3 {
+        return Err(BuiltinError::Throw(error::type_error(
+            &[Value::String(
+                "Reflect.defineProperty requires 3 arguments".to_string(),
+            )],
+            ctx.heap,
+        )));
+    }
+    let _ = super::object::define_property(a, ctx.heap);
+    Ok(Value::Bool(true))
+}
+
+pub fn reflect_has(args: &[Value], ctx: &mut BuiltinContext) -> Result<Value, BuiltinError> {
+    let a = reflect_args(args, 2);
+    if a.len() < 2 {
+        return Err(BuiltinError::Throw(error::type_error(
+            &[Value::String("Reflect.has requires 2 arguments".to_string())],
+            ctx.heap,
+        )));
+    }
+    let result = super::object::has_own(a, ctx.heap);
+    Ok(result)
+}
+
+pub fn reflect_delete_property(args: &[Value], ctx: &mut BuiltinContext) -> Result<Value, BuiltinError> {
+    let a = reflect_args(args, 2);
+    if a.len() < 2 {
+        return Err(BuiltinError::Throw(error::type_error(
+            &[Value::String(
+                "Reflect.deleteProperty requires 2 arguments".to_string(),
+            )],
+            ctx.heap,
+        )));
+    }
+    let target = a.first().ok_or_else(|| {
+        BuiltinError::Throw(error::type_error(
+            &[Value::String(
+                "Reflect.deleteProperty: target required".to_string(),
+            )],
+            ctx.heap,
+        ))
+    })?;
+    let key = to_prop_key_with_heap(a.get(1).unwrap_or(&Value::Undefined), ctx.heap);
+    let heap = &mut ctx.heap;
+    let deleted = match target {
+        Value::Object(id) => heap.delete_prop(*id, &key),
+        _ => false,
+    };
+    Ok(Value::Bool(deleted))
 }
 
 #[cfg(test)]

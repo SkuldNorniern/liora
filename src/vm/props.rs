@@ -228,7 +228,7 @@ pub(crate) fn primitive_string_method(key: &str) -> Value {
         "match" => Value::Builtin(b("String", "match")),
         "search" => Value::Builtin(b("String", "search")),
         "replace" => Value::Builtin(b("String", "replace")),
-        "replaceAll" => Value::Builtin(b("String", "replace")),
+        "replaceAll" => Value::Builtin(b("String", "replaceAll")),
         "trim" => Value::Builtin(b("String", "trim")),
         "startsWith" => Value::Builtin(b("String", "startsWith")),
         "endsWith" => Value::Builtin(b("String", "endsWith")),
@@ -252,8 +252,8 @@ pub(crate) fn primitive_string_method(key: &str) -> Value {
         "sub" => Value::Builtin(b("String", "sub")),
         "sup" => Value::Builtin(b("String", "sup")),
         "substr" => Value::Builtin(b("String", "substr")),
-        "trimLeft" => Value::Builtin(b("String", "trimLeft")),
-        "trimRight" => Value::Builtin(b("String", "trimRight")),
+        "trimLeft" | "trimStart" => Value::Builtin(b("String", "trimLeft")),
+        "trimRight" | "trimEnd" => Value::Builtin(b("String", "trimRight")),
         _ => Value::Undefined,
     }
 }
@@ -292,6 +292,9 @@ pub(crate) fn primitive_map_method(key: &str) -> Value {
         "set" => Value::Builtin(b("Map", "set")),
         "get" => Value::Builtin(b("Map", "get")),
         "has" => Value::Builtin(b("Map", "has")),
+        "entries" => Value::Builtin(b("Map", "entries")),
+        "values" => Value::Builtin(b("Map", "values")),
+        "keys" => Value::Builtin(b("Map", "keys")),
         _ => Value::Undefined,
     }
 }
@@ -300,6 +303,9 @@ pub(crate) fn primitive_set_method(key: &str) -> Value {
     match key {
         "add" => Value::Builtin(b("Set", "add")),
         "has" => Value::Builtin(b("Set", "has")),
+        "entries" => Value::Builtin(b("Set", "entries")),
+        "values" => Value::Builtin(b("Set", "values")),
+        "keys" => Value::Builtin(b("Set", "keys")),
         _ => Value::Undefined,
     }
 }

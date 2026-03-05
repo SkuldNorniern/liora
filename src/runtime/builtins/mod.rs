@@ -22,6 +22,7 @@ mod number;
 mod object;
 mod promise;
 mod reflect;
+mod regex_engine;
 mod regexp;
 mod set;
 mod string;
@@ -704,6 +705,11 @@ const BUILTINS: &[BuiltinDef] = &[
     },
     BuiltinDef {
         category: "String",
+        name: "replaceAll",
+        entry: BuiltinEntry::Throwing(string::replace_all_throwing),
+    },
+    BuiltinDef {
+        category: "String",
         name: "includes",
         entry: BuiltinEntry::Normal(string::includes),
     },
@@ -885,6 +891,21 @@ const BUILTINS: &[BuiltinDef] = &[
         name: "has",
         entry: BuiltinEntry::Normal(map::has),
     },
+    BuiltinDef {
+        category: "Map",
+        name: "entries",
+        entry: BuiltinEntry::Throwing(iterator::map_entries),
+    },
+    BuiltinDef {
+        category: "Map",
+        name: "values",
+        entry: BuiltinEntry::Throwing(iterator::map_values),
+    },
+    BuiltinDef {
+        category: "Map",
+        name: "keys",
+        entry: BuiltinEntry::Throwing(iterator::map_keys),
+    },
     // Set 0..3
     BuiltinDef {
         category: "Set",
@@ -905,6 +926,21 @@ const BUILTINS: &[BuiltinDef] = &[
         category: "Set",
         name: "size",
         entry: BuiltinEntry::Normal(set::size),
+    },
+    BuiltinDef {
+        category: "Set",
+        name: "entries",
+        entry: BuiltinEntry::Throwing(iterator::set_entries),
+    },
+    BuiltinDef {
+        category: "Set",
+        name: "values",
+        entry: BuiltinEntry::Throwing(iterator::set_values),
+    },
+    BuiltinDef {
+        category: "Set",
+        name: "keys",
+        entry: BuiltinEntry::Throwing(iterator::set_keys),
     },
     BuiltinDef {
         category: "WeakMap",
@@ -1008,6 +1044,16 @@ const BUILTINS: &[BuiltinDef] = &[
         category: "Symbol",
         name: "create",
         entry: BuiltinEntry::Normal(symbol::symbol),
+    },
+    BuiltinDef {
+        category: "Symbol",
+        name: "for",
+        entry: BuiltinEntry::Normal(symbol::symbol_for),
+    },
+    BuiltinDef {
+        category: "Symbol",
+        name: "keyFor",
+        entry: BuiltinEntry::Normal(symbol::symbol_key_for),
     },
     BuiltinDef {
         category: "Error",
@@ -1140,6 +1186,21 @@ const BUILTINS: &[BuiltinDef] = &[
         entry: BuiltinEntry::Throwing(reflect::reflect_construct),
     },
     BuiltinDef {
+        category: "Reflect",
+        name: "defineProperty",
+        entry: BuiltinEntry::Throwing(reflect::reflect_define_property),
+    },
+    BuiltinDef {
+        category: "Reflect",
+        name: "has",
+        entry: BuiltinEntry::Throwing(reflect::reflect_has),
+    },
+    BuiltinDef {
+        category: "Reflect",
+        name: "deleteProperty",
+        entry: BuiltinEntry::Throwing(reflect::reflect_delete_property),
+    },
+    BuiltinDef {
         category: "Object",
         name: "toString",
         entry: BuiltinEntry::Normal(object::to_string),
@@ -1225,6 +1286,16 @@ const BUILTINS: &[BuiltinDef] = &[
         entry: BuiltinEntry::Throwing(iterator::string_next),
     },
     BuiltinDef {
+        category: "Iterator",
+        name: "mapNext",
+        entry: BuiltinEntry::Throwing(iterator::map_next),
+    },
+    BuiltinDef {
+        category: "Iterator",
+        name: "setNext",
+        entry: BuiltinEntry::Throwing(iterator::set_next),
+    },
+    BuiltinDef {
         category: "Promise",
         name: "constructor",
         entry: BuiltinEntry::Throwing(promise::promise_constructor),
@@ -1303,7 +1374,7 @@ pub fn length(id: u8) -> i32 {
             | ("String", "link")
             | ("String", "match")
             | ("String", "search") => 1,
-            ("String", "replace") => 2,
+            ("String", "replace") | ("String", "replaceAll") => 2,
             ("String", "substr") => 2,
             ("Date", "setYear") => 1,
             ("Array", "includes") | ("Array", "indexOf") | ("Array", "lastIndexOf") => 1,

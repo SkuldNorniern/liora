@@ -5300,6 +5300,16 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                             argc: 1,
                             span: e.span,
                         });
+                    } else if matches!(obj_name.as_deref(), Some(s) if s == "Object")
+                        && prop == "getOwnPropertyNames"
+                        && e.args.len() == 1
+                    {
+                        compile_call_arg(&e.args[0], ctx, e.span)?;
+                        ctx.blocks[ctx.current_block].ops.push(HirOp::CallBuiltin {
+                            builtin: b("Object", "getOwnPropertyNames"),
+                            argc: 1,
+                            span: e.span,
+                        });
                     } else if matches!(obj_name.as_deref(), Some(s) if s == "Number")
                         && prop == "isInteger"
                         && e.args.len() == 1

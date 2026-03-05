@@ -1,4 +1,4 @@
-use super::{BuiltinContext, BuiltinError, to_number, to_prop_key};
+use super::{regex_engine, BuiltinContext, BuiltinError, to_number, to_prop_key};
 use crate::runtime::{Heap, Value};
 
 fn html_escape(s: &str) -> String {
@@ -271,9 +271,9 @@ fn replace_impl(
             };
             let repl = replace_val.map(|v| v.to_string()).unwrap_or_default();
             let result = if flags.contains('g') {
-                s.replace(pattern.as_str(), repl.as_str())
+                regex_engine::regex_replace_all(pattern.as_str(), &flags, &s, &repl)
             } else {
-                s.replacen(pattern.as_str(), repl.as_str(), 1)
+                regex_engine::regex_replace_first(pattern.as_str(), &flags, &s, &repl)
             };
             Value::String(result)
         }
@@ -284,6 +284,78 @@ fn replace_impl(
         }
         None => Value::String(s),
     }
+}
+
+fn replace_all_impl(
+    receiver: &Value,
+    search_val: Option<&Value>,
+    replace_val: Option<&Value>,
+    heap: &mut Heap,
+) -> Value {
+    let s = match receiver {
+        Value::String(x) => x.clone(),
+        _ => receiver.to_string(),
+    };
+    match search_val {
+        Some(Value::Object(id)) => {
+            let pattern = match heap.get_prop(*id, "__regexp_pattern") {
+                Value::String(p) => p.clone(),
+                _ => return Value::String(s),
+            };
+            let flags = match heap.get_prop(*id, "__regexp_flags") {
+                Value::String(f) => f.clone(),
+                _ => String::new(),
+            };
+            let repl = replace_val.map(|v| v.to_string()).unwrap_or_default();
+            Value::String(regex_engine::regex_replace_all(
+                pattern.as_str(),
+                &flags,
+                &s,
+                &repl,
+            ))
+        }
+        Some(v) => {
+            let search = v.to_string();
+            let repl = replace_val.map(|v| v.to_string()).unwrap_or_default();
+            Value::String(s.replace(&search, &repl))
+        }
+        None => Value::String(s),
+    }
+}
+
+pub fn replace_all_throwing(args: &[Value], ctx: &mut BuiltinContext) -> Result<Value, BuiltinError> {
+    let receiver = args.first().cloned().unwrap_or(Value::Undefined);
+    let search_val = args.get(1);
+    let replace_val = args.get(2).cloned();
+    if let Some(Value::Object(search_id)) = search_val {
+        let replacer = ctx.heap.get_prop(*search_id, "Symbol.replace");
+        let callable = matches!(
+            replacer,
+            Value::Function(_)
+                | Value::DynamicFunction(_)
+                | Value::Builtin(_)
+                | Value::BoundBuiltin(_, _, _)
+                | Value::BoundFunction(_, _, _)
+        );
+        if !matches!(replacer, Value::Undefined) && callable {
+            let mut repl_args = vec![receiver];
+            if let Some(r) = &replace_val {
+                repl_args.push(r.clone());
+            }
+            return Err(BuiltinError::Invoke {
+                callee: replacer,
+                this_arg: Value::Object(*search_id),
+                args: repl_args,
+                new_object: None,
+            });
+        }
+    }
+    Ok(replace_all_impl(
+        &receiver,
+        search_val,
+        replace_val.as_ref(),
+        ctx.heap,
+    ))
 }
 
 pub fn replace_throwing(args: &[Value], ctx: &mut BuiltinContext) -> Result<Value, BuiltinError> {
