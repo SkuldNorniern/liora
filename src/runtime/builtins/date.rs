@@ -211,10 +211,10 @@ pub fn set_year(args: &[Value], heap: &mut Heap) -> Value {
 
 fn ymd_to_days(y: i32, mo: i32, d: i32) -> i64 {
     let adj = if mo <= 2 { 1 } else { 0 };
-    let y = y - adj;
+    let y_adj = (y as i64).saturating_sub(adj as i64);
     let m = (mo + 9) % 12 + 1;
-    let era = (y as i64) / 400;
-    let yoe = (y as i64) % 400;
+    let era = y_adj / 400;
+    let yoe = y_adj % 400;
     let doy = (153 * (m as i64) + 2) / 5 + (d as i64) - 1;
     let doe = 365 * yoe + yoe / 4 - yoe / 100 + doy;
     era * 146097 + doe - 719468

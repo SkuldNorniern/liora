@@ -534,7 +534,7 @@ const BUILTINS: &[BuiltinDef] = &[
     BuiltinDef {
         category: "Json",
         name: "stringify",
-        entry: BuiltinEntry::Normal(json::stringify),
+        entry: BuiltinEntry::Throwing(json::stringify),
     },
     // Object 0..7
     BuiltinDef {

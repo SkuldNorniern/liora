@@ -813,22 +813,26 @@ pub fn flat(args: &[Value], heap: &mut Heap) -> Value {
         Some(Value::Array(id)) => *id,
         _ => return Value::Undefined,
     };
+    let depth = args.get(1).map(super::to_number).unwrap_or(1.0) as i32;
+    let depth = if depth < 1 { 1 } else { depth };
+    let mut out: Vec<Value> = Vec::new();
+    let mut stack: Vec<(Value, i32)> = Vec::new();
     let elements: Vec<Value> = heap
         .array_elements(receiver)
         .map(|e| e.to_vec())
         .unwrap_or_default();
-    let depth = args.get(1).map(super::to_number).unwrap_or(1.0) as i32;
-    let depth = if depth < 1 { 1 } else { depth.min(100) };
-    let mut out: Vec<Value> = Vec::new();
-    for v in elements {
+    for v in elements.into_iter().rev() {
+        stack.push((v, depth));
+    }
+    while let Some((v, d)) = stack.pop() {
         if let Value::Array(nested_id) = v {
-            if depth > 1 {
-                let nested_args = [Value::Array(nested_id), Value::Int(depth - 1)];
-                let flattened = flat(&nested_args, heap);
-                if let Value::Array(flat_id) = flattened {
-                    if let Some(nested) = heap.array_elements(flat_id) {
-                        out.extend(nested.iter().cloned());
-                    }
+            if d > 1 {
+                let nested: Vec<Value> = heap
+                    .array_elements(nested_id)
+                    .map(|e| e.to_vec())
+                    .unwrap_or_default();
+                for v in nested.into_iter().rev() {
+                    stack.push((v, d - 1));
                 }
             } else if let Some(nested) = heap.array_elements(nested_id) {
                 out.extend(nested.iter().cloned());
@@ -892,7 +896,10 @@ pub fn copy_within(args: &[Value], heap: &mut Heap) -> Value {
             }
         })
         .unwrap_or(len) as usize;
-    let count = (end - start).min(len as usize - target);
+    let len_usize = len.max(0) as usize;
+    let count = end
+        .saturating_sub(start)
+        .min(len_usize.saturating_sub(target));
     for i in 0..count {
         if let Some(v) = elements.get(start + i) {
             if target + i < elements.len() {
