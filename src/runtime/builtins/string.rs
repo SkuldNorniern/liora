@@ -1,4 +1,4 @@
-use super::{BuiltinContext, BuiltinError, regex_engine, to_number, to_prop_key};
+use super::{regex_engine, to_number, to_prop_key, BuiltinContext, BuiltinError};
 use crate::runtime::{Heap, Value};
 
 fn html_escape(s: &str) -> String {
@@ -490,6 +490,42 @@ pub fn char_code_at(args: &[Value], _heap: &mut Heap) -> Value {
     Value::Number(code)
 }
 
+pub fn code_point_at(args: &[Value], _heap: &mut Heap) -> Value {
+    let s = match args.first() {
+        Some(Value::String(x)) => x.clone(),
+        Some(v) => v.to_string(),
+        None => return Value::Undefined,
+    };
+    let idx = args.get(1).map(to_number).unwrap_or(0.0);
+    let i = if idx.is_nan() {
+        0i64
+    } else if idx.is_infinite() {
+        return Value::Undefined;
+    } else {
+        idx.trunc() as i64
+    };
+    if i < 0 {
+        return Value::Undefined;
+    }
+    let units: Vec<u16> = s.encode_utf16().collect();
+    let pos = i as usize;
+    if pos >= units.len() {
+        return Value::Undefined;
+    }
+    let first = units[pos];
+    let code_point = if (0xD800..=0xDBFF).contains(&first) && pos + 1 < units.len() {
+        let second = units[pos + 1];
+        if (0xDC00..=0xDFFF).contains(&second) {
+            0x10000 + (((first as u32 - 0xD800) << 10) | (second as u32 - 0xDC00))
+        } else {
+            first as u32
+        }
+    } else {
+        first as u32
+    };
+    Value::Number(code_point as f64)
+}
+
 fn split_impl(receiver: &Value, sep_val: Option<&Value>, heap: &mut Heap) -> Value {
     let s = match receiver {
         Value::String(x) => x.clone(),
@@ -787,5 +823,26 @@ mod tests {
         let args = [Value::String("hi".to_string()), Value::Int(99)];
         let result = char_code_at(&args, &mut heap);
         assert!(matches!(result, Value::Number(n) if n.is_nan()));
+    }
+
+    #[test]
+    fn code_point_at_basic_ascii() {
+        let mut heap = Heap::new();
+        let args = [Value::String("hello".to_string()), Value::Int(1)];
+        let result = code_point_at(&args, &mut heap);
+        assert_eq!(result, Value::Number(101.0));
+    }
+
+    #[test]
+    fn code_point_at_handles_surrogate_pairs() {
+        let mut heap = Heap::new();
+        let at_start = [Value::String("😀".to_string()), Value::Int(0)];
+        let at_second_unit = [Value::String("😀".to_string()), Value::Int(1)];
+
+        assert_eq!(code_point_at(&at_start, &mut heap), Value::Number(128512.0));
+        assert_eq!(
+            code_point_at(&at_second_unit, &mut heap),
+            Value::Number(56832.0)
+        );
     }
 }

@@ -7,12 +7,52 @@ use crate::frontend::{Parser, check_early_errors};
 use crate::ir::{hir_to_bytecode, script_to_hir};
 use crate::runtime::Value;
 use crate::vm::{Completion, Program, interpret_program_with_heap};
+use std::collections::{HashMap, HashSet};
 
 fn invalid_function_syntax_error(heap: &mut crate::runtime::Heap) -> BuiltinError {
     BuiltinError::Throw(error::syntax_error(
         &[Value::String("Invalid function body".to_string())],
         heap,
     ))
+}
+
+fn body_has_use_strict_directive(function_body: &str) -> bool {
+    let trimmed = function_body.trim_start();
+    trimmed.starts_with("\"use strict\"") || trimmed.starts_with("'use strict'")
+}
+
+fn has_duplicate_parameters(parameter_list: &str) -> bool {
+    let mut seen = HashSet::new();
+    for parameter_name in parameter_list.split(',').map(|p| p.trim()) {
+        if parameter_name.is_empty() {
+            continue;
+        }
+        if !seen.insert(parameter_name.to_string()) {
+            return true;
+        }
+    }
+    false
+}
+
+fn sanitize_duplicate_parameters(parameter_list: &str) -> String {
+    let mut seen_counts: HashMap<String, usize> = HashMap::new();
+    let mut sanitized = Vec::new();
+
+    for parameter_name in parameter_list.split(',').map(|p| p.trim()) {
+        if parameter_name.is_empty() {
+            continue;
+        }
+        let count = seen_counts.entry(parameter_name.to_string()).or_insert(0);
+        let effective_name = if *count == 0 {
+            parameter_name.to_string()
+        } else {
+            format!("{}__dup{}", parameter_name, *count)
+        };
+        *count += 1;
+        sanitized.push(effective_name);
+    }
+
+    sanitized.join(", ")
 }
 
 pub fn function_constructor(
@@ -82,9 +122,19 @@ pub fn function_constructor(
         })
         .collect();
     let param_list = params.join(", ");
+    let duplicate_parameters = has_duplicate_parameters(&param_list);
+    let strict_body = body_has_use_strict_directive(&body);
+    if duplicate_parameters && strict_body {
+        return Err(invalid_function_syntax_error(ctx.heap));
+    }
+    let effective_param_list = if duplicate_parameters {
+        sanitize_duplicate_parameters(&param_list)
+    } else {
+        param_list.clone()
+    };
     let wrapped = format!(
         "function main() {{ return (function({}) {{\n{}\n}}); }}\n",
-        param_list, body
+        effective_param_list, body
     );
     let script = match Parser::new(&wrapped).parse() {
         Ok(s) => s,

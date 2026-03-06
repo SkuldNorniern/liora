@@ -438,6 +438,16 @@ impl Heap {
             "charAt",
             Value::Builtin(b("String", "charAt")),
         );
+        self.set_prop(
+            str_proto_id,
+            "charCodeAt",
+            Value::Builtin(b("String", "charCodeAt")),
+        );
+        self.set_prop(
+            str_proto_id,
+            "codePointAt",
+            Value::Builtin(b("String", "codePointAt")),
+        );
         self.set_prop(str_proto_id, "at", Value::Builtin(b("String", "at")));
         self.set_prop(
             str_proto_id,

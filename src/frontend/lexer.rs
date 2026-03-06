@@ -100,12 +100,63 @@ impl Lexer<'_> {
         self.scan_html_open_comment() || self.scan_html_close_comment()
     }
 
+    fn is_identifier_start(ch: char) -> bool {
+        ch == '_' || ch == '$' || ch.is_alphabetic()
+    }
+
+    fn is_identifier_part(ch: char) -> bool {
+        Self::is_identifier_start(ch) || ch.is_alphanumeric() || ch == '\u{200C}' || ch == '\u{200D}'
+    }
+
+    fn consume_identifier_escape(&mut self) -> Option<char> {
+        let tail = self.source.get(self.position.byte_offset..)?;
+        let bytes = tail.as_bytes();
+        if bytes.len() < 2 || bytes[0] != b'\\' || bytes[1] != b'u' {
+            return None;
+        }
+
+        let (decoded, consumed_bytes) = if bytes.get(2) == Some(&b'{') {
+            let close_index = tail.get(3..)?.find('}')? + 3;
+            let hex = tail.get(3..close_index)?;
+            if hex.is_empty() || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+                return None;
+            }
+            let code_point = u32::from_str_radix(hex, 16).ok()?;
+            let decoded = char::from_u32(code_point)?;
+            (decoded, close_index + 1)
+        } else {
+            if bytes.len() < 6 {
+                return None;
+            }
+            let hex = tail.get(2..6)?;
+            if !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+                return None;
+            }
+            let code_point = u32::from_str_radix(hex, 16).ok()?;
+            let decoded = char::from_u32(code_point)?;
+            (decoded, 6)
+        };
+
+        let consumed_chars = tail.get(..consumed_bytes)?.chars().count();
+        for _ in 0..consumed_chars {
+            self.advance();
+        }
+        Some(decoded)
+    }
+
     fn scan_identifier(&mut self) -> Token {
         let start_pos = self.position;
         let mut lexeme = String::new();
 
         while let Some(ch) = self.current_char {
-            if ch.is_alphanumeric() || ch == '_' || ch == '$' {
+            if ch == '\\' {
+                if let Some(decoded) = self.consume_identifier_escape() {
+                    lexeme.push(decoded);
+                    continue;
+                }
+                break;
+            }
+            if Self::is_identifier_part(ch) {
                 lexeme.push(ch);
                 self.advance();
             } else {
@@ -533,7 +584,7 @@ impl Lexer<'_> {
         }
         let mut flags = String::new();
         while let Some(ch) = self.current_char {
-            if matches!(ch, 'g' | 'i' | 'm' | 's' | 'u' | 'y') {
+            if matches!(ch, 'g' | 'i' | 'm' | 's' | 'u' | 'y' | 'd' | 'v') {
                 flags.push(ch);
                 self.advance();
             } else {
@@ -738,7 +789,8 @@ impl Lexer<'_> {
                     self.scan_regex_literal()
                 }
             }
-            'a'..='z' | 'A'..='Z' | '_' | '$' => self.scan_identifier(),
+            _ if Self::is_identifier_start(ch) => self.scan_identifier(),
+            '\\' if self.peek() == Some('u') => self.scan_identifier(),
             _ => {
                 if let Some((token_type, length)) = self
                     .keywords_trie
@@ -915,6 +967,38 @@ mod tests {
         assert_eq!(tokens[11].token_type, TokenType::Identifier);
         assert_eq!(tokens[12].token_type, TokenType::Semicolon);
         assert_eq!(tokens[13].token_type, TokenType::RightBrace);
+    }
+
+    #[test]
+    fn lexer_regex_flags_d_and_v() {
+        let source = "let a = /foo/d; let b = /bar/v;".to_string();
+        let mut lexer = Lexer::new(source);
+        let tokens = lexer.tokenize();
+        let regex_tokens: Vec<_> = tokens
+            .iter()
+            .filter_map(|token| match &token.token_type {
+                TokenType::RegExpLiteral { pattern, flags } => Some((pattern.clone(), flags.clone())),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(regex_tokens.len(), 2);
+        assert_eq!(regex_tokens[0], ("foo".to_string(), "d".to_string()));
+        assert_eq!(regex_tokens[1], ("bar".to_string(), "v".to_string()));
+    }
+
+    #[test]
+    fn lexer_identifier_unicode_escape_after_dot() {
+        let source = "groups.\\u03C0".to_string();
+        let mut lexer = Lexer::new(source);
+        let tokens = lexer.tokenize();
+
+        assert_eq!(tokens.len(), 3);
+        assert_eq!(tokens[0].token_type, TokenType::Identifier);
+        assert_eq!(tokens[0].lexeme, "groups");
+        assert_eq!(tokens[1].token_type, TokenType::Dot);
+        assert_eq!(tokens[2].token_type, TokenType::Identifier);
+        assert_eq!(tokens[2].lexeme, "π");
     }
 
     #[test]

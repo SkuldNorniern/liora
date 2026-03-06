@@ -1,6 +1,6 @@
 mod calls;
 pub mod interpreter;
-mod ops;
+pub mod ops;
 mod props;
 mod tiering;
 mod types;

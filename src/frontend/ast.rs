@@ -173,6 +173,7 @@ pub struct ForInStmt {
 pub struct ForOfStmt {
     pub id: NodeId,
     pub span: Span,
+    pub is_await: bool,
     pub left: ForInOfLeft,
     pub right: Box<Expression>,
     pub body: Box<Statement>,
@@ -462,6 +463,14 @@ pub enum ObjectPropertyOrSpread {
 pub struct ObjectProperty {
     pub key: ObjectPropertyKey,
     pub value: Expression,
+    pub kind: ObjectPropertyKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ObjectPropertyKind {
+    Data,
+    Get,
+    Set,
 }
 
 #[derive(Debug, Clone)]

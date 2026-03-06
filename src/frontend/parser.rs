@@ -1,7 +1,7 @@
 use crate::diagnostics::{ErrorCode, Span};
-use crate::frontend::Lexer;
 use crate::frontend::ast::*;
 use crate::frontend::token_type::{Token, TokenType};
+use crate::frontend::Lexer;
 
 const MAX_RECURSION: u32 = 256;
 
@@ -823,6 +823,54 @@ impl Parser {
         }
     }
 
+    fn parse_object_literal_static_key(&mut self) -> Result<(String, bool, Span), ParseError> {
+        let token = self
+            .current()
+            .ok_or_else(|| ParseError {
+                code: ErrorCode::ParseUnexpectedEofExpected,
+                message: "unexpected end in object literal".to_string(),
+                span: None,
+            })?
+            .clone();
+        let key_span = token.span;
+
+        match token.token_type {
+            TokenType::Identifier => {
+                Ok((self.expect(TokenType::Identifier)?.lexeme, true, key_span))
+            }
+            TokenType::Number => Ok((self.expect(TokenType::Number)?.lexeme, false, key_span)),
+            TokenType::String => {
+                let raw = self.expect(TokenType::String)?.lexeme;
+                let normalized = if let Some(stripped) = raw
+                    .strip_prefix('"')
+                    .and_then(|inner| inner.strip_suffix('"'))
+                {
+                    stripped.to_string()
+                } else if let Some(stripped) = raw
+                    .strip_prefix('\'')
+                    .and_then(|inner| inner.strip_suffix('\''))
+                {
+                    stripped.to_string()
+                } else {
+                    raw
+                };
+                Ok((normalized, false, key_span))
+            }
+            _ if token.token_type.is_keyword() => {
+                let key_token = self.expect_property_name()?;
+                Ok((key_token.lexeme, false, key_span))
+            }
+            _ => Err(ParseError {
+                code: ErrorCode::ParseUnexpectedToken,
+                message: format!(
+                    "expected property name, got {:?}",
+                    self.current().map(|t| &t.token_type)
+                ),
+                span: self.current().map(|t| t.span),
+            }),
+        }
+    }
+
     fn parse_class_inner(
         &mut self,
         require_name: bool,
@@ -1493,6 +1541,19 @@ impl Parser {
         let start_span = self.expect(TokenType::For)?.span;
         let id = self.next_id();
 
+        let is_await = if self.optional(TokenType::Await) {
+            if self.async_depth == 0 {
+                return Err(ParseError {
+                    code: ErrorCode::ParseForInOfDecl,
+                    message: "for await (...) is only valid in async functions".to_string(),
+                    span: Some(start_span),
+                });
+            }
+            true
+        } else {
+            false
+        };
+
         self.expect(TokenType::LeftParen)?;
 
         let init = if matches!(
@@ -1507,20 +1568,20 @@ impl Parser {
         ) {
             let decl_stmt = self.parse_for_in_of_decl()?;
             if matches!(self.current().map(|t| &t.token_type), Some(TokenType::In)) {
-                return self.parse_for_in_of(start_span, id, decl_stmt, true);
+                return self.parse_for_in_of(start_span, id, decl_stmt, true, is_await);
             }
             if matches!(self.current().map(|t| &t.token_type), Some(TokenType::Of)) {
-                return self.parse_for_in_of(start_span, id, decl_stmt, false);
+                return self.parse_for_in_of(start_span, id, decl_stmt, false, is_await);
             }
             self.optional(TokenType::Semicolon);
             Some(Box::new(decl_stmt))
         } else {
             let expr = self.parse_expression()?;
             if matches!(self.current().map(|t| &t.token_type), Some(TokenType::In)) {
-                return self.parse_for_in_of_expr(start_span, id, expr, true);
+                return self.parse_for_in_of_expr(start_span, id, expr, true, is_await);
             }
             if matches!(self.current().map(|t| &t.token_type), Some(TokenType::Of)) {
-                return self.parse_for_in_of_expr(start_span, id, expr, false);
+                return self.parse_for_in_of_expr(start_span, id, expr, false, is_await);
             }
             let span = expr.span();
             self.expect(TokenType::Semicolon)?;
@@ -1552,6 +1613,14 @@ impl Parser {
         };
 
         self.expect(TokenType::RightParen)?;
+
+        if is_await {
+            return Err(ParseError {
+                code: ErrorCode::ParseForInOfDecl,
+                message: "for await (...) requires an 'of' loop".to_string(),
+                span: Some(start_span),
+            });
+        }
 
         let body = Box::new(self.parse_statement()?);
         let span = start_span.merge(body.span());
@@ -1617,7 +1686,15 @@ impl Parser {
         id: NodeId,
         decl_stmt: Statement,
         is_in: bool,
+        is_await: bool,
     ) -> Result<Statement, ParseError> {
+        if is_await && is_in {
+            return Err(ParseError {
+                code: ErrorCode::ParseForInOfDecl,
+                message: "for await (...) does not support 'in' loops".to_string(),
+                span: Some(start_span),
+            });
+        }
         let left = match &decl_stmt {
             Statement::VarDecl(v) => {
                 if v.declarations.len() != 1 {
@@ -1725,6 +1802,7 @@ impl Parser {
             Ok(Statement::ForOf(crate::frontend::ast::ForOfStmt {
                 id,
                 span,
+                is_await,
                 left,
                 right,
                 body,
@@ -1738,7 +1816,15 @@ impl Parser {
         id: NodeId,
         expr: Expression,
         is_in: bool,
+        is_await: bool,
     ) -> Result<Statement, ParseError> {
+        if is_await && is_in {
+            return Err(ParseError {
+                code: ErrorCode::ParseForInOfDecl,
+                message: "for await (...) does not support 'in' loops".to_string(),
+                span: Some(start_span),
+            });
+        }
         let left = match &expr {
             Expression::Identifier(e) => {
                 crate::frontend::ast::ForInOfLeft::Identifier(e.name.clone())
@@ -1773,6 +1859,7 @@ impl Parser {
             Ok(Statement::ForOf(crate::frontend::ast::ForOfStmt {
                 id,
                 span,
+                is_await,
                 left,
                 right,
                 body,
@@ -1788,6 +1875,9 @@ impl Parser {
                     let ObjectPropertyOrSpread::Property(prop) = prop else {
                         continue;
                     };
+                    if prop.kind != ObjectPropertyKind::Data {
+                        return None;
+                    }
                     let key = match &prop.key {
                         ObjectPropertyKey::Static(k) => k.clone(),
                         ObjectPropertyKey::Computed(_) => return None,
@@ -2774,6 +2864,29 @@ impl Parser {
                 });
             } else if matches!(
                 self.current().map(|t| &t.token_type),
+                Some(TokenType::TemplateLiteral)
+            ) {
+                let template_token = self
+                    .current()
+                    .ok_or_else(|| ParseError {
+                        code: ErrorCode::ParseUnexpectedEofInExpr,
+                        message: "unexpected end of input in tagged template".to_string(),
+                        span: None,
+                    })?
+                    .clone();
+                let template_span = template_token.span;
+                let raw = template_token.lexeme.clone();
+                self.advance();
+                let template_expr = self.parse_template_literal(&raw, template_span)?;
+                let span = expr.span().merge(template_span);
+                expr = Expression::Call(CallExpr {
+                    id: self.next_id(),
+                    span,
+                    callee: Box::new(expr),
+                    args: vec![CallArg::Expr(template_expr)],
+                });
+            } else if matches!(
+                self.current().map(|t| &t.token_type),
                 Some(TokenType::OptionalChaining)
             ) && matches!(self.peek(), Some(TokenType::LeftBracket))
             {
@@ -3194,7 +3307,48 @@ impl Parser {
                         }
                         continue;
                     }
-                    if property_token.token_type == TokenType::LeftBracket {
+
+                    let is_accessor_prefix = property_token.token_type == TokenType::Identifier
+                        && (property_token.lexeme == "get" || property_token.lexeme == "set")
+                        && !matches!(
+                            self.peek(),
+                            Some(TokenType::LeftParen)
+                                | Some(TokenType::Colon)
+                                | Some(TokenType::Comma)
+                                | Some(TokenType::RightBrace)
+                                | Some(TokenType::Eof)
+                                | None
+                        );
+
+                    if is_accessor_prefix {
+                        let accessor_kind = if property_token.lexeme == "get" {
+                            ObjectPropertyKind::Get
+                        } else {
+                            ObjectPropertyKind::Set
+                        };
+                        self.advance();
+
+                        let (key, key_span, method_name) = if matches!(
+                            self.current().map(|t| &t.token_type),
+                            Some(TokenType::LeftBracket)
+                        ) {
+                            let key_span = self.expect(TokenType::LeftBracket)?.span;
+                            let computed_key = self.parse_expression_prec(1)?;
+                            self.expect(TokenType::RightBracket)?;
+                            (ObjectPropertyKey::Computed(computed_key), key_span, None)
+                        } else {
+                            let (key, _is_identifier_key, key_span) =
+                                self.parse_object_literal_static_key()?;
+                            (ObjectPropertyKey::Static(key.clone()), key_span, Some(key))
+                        };
+
+                        let value = self.parse_object_method_expression(key_span, method_name)?;
+                        properties.push(ObjectPropertyOrSpread::Property(ObjectProperty {
+                            key,
+                            value,
+                            kind: accessor_kind,
+                        }));
+                    } else if property_token.token_type == TokenType::LeftBracket {
                         let key_span = property_token.span;
                         self.advance();
                         let computed_key = self.parse_expression_prec(1)?;
@@ -3213,45 +3367,11 @@ impl Parser {
                         properties.push(ObjectPropertyOrSpread::Property(ObjectProperty {
                             key: ObjectPropertyKey::Computed(computed_key),
                             value,
+                            kind: ObjectPropertyKind::Data,
                         }));
                     } else {
-                        let key_span = property_token.span;
-                        let (key, is_identifier_key) = match property_token.token_type {
-                            TokenType::Identifier => {
-                                (self.expect(TokenType::Identifier)?.lexeme, true)
-                            }
-                            TokenType::Number => (self.expect(TokenType::Number)?.lexeme, false),
-                            TokenType::String => {
-                                let raw = self.expect(TokenType::String)?.lexeme;
-                                let normalized = if let Some(stripped) = raw
-                                    .strip_prefix('"')
-                                    .and_then(|inner| inner.strip_suffix('"'))
-                                {
-                                    stripped.to_string()
-                                } else if let Some(stripped) = raw
-                                    .strip_prefix('\'')
-                                    .and_then(|inner| inner.strip_suffix('\''))
-                                {
-                                    stripped.to_string()
-                                } else {
-                                    raw
-                                };
-                                (normalized, false)
-                            }
-                            _ if property_token.token_type.is_keyword() => {
-                                (self.expect_property_name()?.lexeme, false)
-                            }
-                            _ => {
-                                return Err(ParseError {
-                                    code: ErrorCode::ParseUnexpectedToken,
-                                    message: format!(
-                                        "expected property name, got {:?}",
-                                        self.current().map(|t| &t.token_type)
-                                    ),
-                                    span: self.current().map(|t| t.span),
-                                });
-                            }
-                        };
+                        let (key, is_identifier_key, key_span) =
+                            self.parse_object_literal_static_key()?;
 
                         let value = if matches!(
                             self.current().map(|t| &t.token_type),
@@ -3278,6 +3398,7 @@ impl Parser {
                         properties.push(ObjectPropertyOrSpread::Property(ObjectProperty {
                             key: ObjectPropertyKey::Static(key),
                             value,
+                            kind: ObjectPropertyKind::Data,
                         }));
                     }
                     if !self.optional(TokenType::Comma) {
@@ -4507,12 +4628,34 @@ mod tests {
         if let Statement::FunctionDecl(f) = &script.body[0] {
             if let Statement::Block(b) = &*f.body {
                 if let Statement::ForOf(s) = &b.body[0] {
+                    assert!(!s.is_await);
                     assert!(matches!(s.left, ForInOfLeft::ConstDecl(ref n) if n == "x"));
                     return;
                 }
             }
         }
         panic!("expected for-of in block");
+    }
+
+    #[test]
+    fn parse_for_await_of() {
+        let script = parse_ok("async function f() { for await (const x of arr) { return x; } }");
+        if let Statement::FunctionDecl(f) = &script.body[0] {
+            if let Statement::Block(b) = &*f.body {
+                if let Statement::ForOf(s) = &b.body[0] {
+                    assert!(s.is_await);
+                    assert!(matches!(s.left, ForInOfLeft::ConstDecl(ref n) if n == "x"));
+                    return;
+                }
+            }
+        }
+        panic!("expected for-await-of in block");
+    }
+
+    #[test]
+    fn parse_for_await_outside_async_is_error() {
+        let err = parse_err("function f() { for await (const x of arr) { return x; } }");
+        assert_eq!(err.code, ErrorCode::ParseForInOfDecl);
     }
 
     #[test]
@@ -4903,6 +5046,62 @@ mod tests {
         let _ = parse_ok(
             "function f() { let value = 1; return { value, with: 2, delete() { return value; }, return() { return 3; } }; }",
         );
+    }
+
+    #[test]
+    fn parse_object_literal_accessors() {
+        let script = parse_ok("({ get 0() { return 1; }, set [Symbol.match](value) { this.value = value; } });");
+        if let Statement::Expression(expr_stmt) = &script.body[0]
+            && let Expression::ObjectLiteral(object_literal) = expr_stmt.expression.as_ref()
+        {
+            assert_eq!(object_literal.properties.len(), 2);
+            let ObjectPropertyOrSpread::Property(first) = &object_literal.properties[0] else {
+                panic!("expected first property");
+            };
+            assert!(matches!(first.kind, ObjectPropertyKind::Get));
+            assert!(matches!(&first.key, ObjectPropertyKey::Static(s) if s == "0"));
+
+            let ObjectPropertyOrSpread::Property(second) = &object_literal.properties[1] else {
+                panic!("expected second property");
+            };
+            assert!(matches!(second.kind, ObjectPropertyKind::Set));
+            assert!(matches!(&second.key, ObjectPropertyKey::Computed(_)));
+            return;
+        }
+        panic!("expected object literal with accessor properties");
+    }
+
+    #[test]
+    fn parse_object_literal_method_named_get() {
+        let script = parse_ok("({ get() { return 1; } });");
+        if let Statement::Expression(expr_stmt) = &script.body[0]
+            && let Expression::ObjectLiteral(object_literal) = expr_stmt.expression.as_ref()
+        {
+            let ObjectPropertyOrSpread::Property(property) = &object_literal.properties[0] else {
+                panic!("expected property");
+            };
+            assert!(matches!(property.kind, ObjectPropertyKind::Data));
+            assert!(matches!(&property.key, ObjectPropertyKey::Static(s) if s == "get"));
+            return;
+        }
+        panic!("expected object literal method named get");
+    }
+
+    #[test]
+    fn parse_tagged_template_call() {
+        let script = parse_ok("tag`hello ${name}`;");
+        if let Statement::Expression(expr_stmt) = &script.body[0] {
+            if let Expression::Call(call) = expr_stmt.expression.as_ref() {
+                assert_eq!(call.args.len(), 1);
+                return;
+            }
+        }
+        panic!("expected tagged template to parse as call expression");
+    }
+
+    #[test]
+    fn parse_member_unicode_escape_property() {
+        let _ = parse_ok("function main() { return groups.\\u03C0; }");
     }
 
     #[test]

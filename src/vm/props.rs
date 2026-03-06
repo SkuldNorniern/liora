@@ -245,6 +245,7 @@ pub(crate) fn primitive_string_method(key: &str) -> Value {
         "toUpperCase" => Value::Builtin(b("String", "toUpperCase")),
         "charAt" => Value::Builtin(b("String", "charAt")),
         "charCodeAt" => Value::Builtin(b("String", "charCodeAt")),
+        "codePointAt" => Value::Builtin(b("String", "codePointAt")),
         "at" => Value::Builtin(b("String", "at")),
         "repeat" => Value::Builtin(b("String", "repeat")),
         "anchor" => Value::Builtin(b("String", "anchor")),

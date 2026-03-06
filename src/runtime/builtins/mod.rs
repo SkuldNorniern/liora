@@ -766,6 +766,11 @@ const BUILTINS: &[BuiltinDef] = &[
     },
     BuiltinDef {
         category: "String",
+        name: "codePointAt",
+        entry: BuiltinEntry::Normal(string::code_point_at),
+    },
+    BuiltinDef {
+        category: "String",
         name: "at",
         entry: BuiltinEntry::Normal(string::at),
     },

@@ -119,7 +119,7 @@ pub fn serve(dir: &str, port: Option<u16>) -> Result<(), std::io::Error> {
     let port = port.unwrap_or(DEFAULT_PORT);
     let addr = format!("127.0.0.1:{}", port);
     let listener = TcpListener::bind(&addr)?;
-    eprintln!("jsina serve: http://{}", addr);
+    eprintln!("liora serve: http://{}", addr);
     eprintln!("serving from: {}", root.display());
     for s in listener.incoming().flatten() {
         handle_client(s, root)

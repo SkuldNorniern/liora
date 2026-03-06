@@ -2203,6 +2203,11 @@ fn compile_statement(stmt: &Statement, ctx: &mut LowerCtx<'_>) -> Result<bool, L
                 argc: 0,
                 span: f.span,
             });
+            if f.is_await {
+                ctx.blocks[ctx.current_block]
+                    .ops
+                    .push(HirOp::Await { span: f.span });
+            }
             ctx.blocks[ctx.current_block].ops.push(HirOp::StoreLocal {
                 id: result_slot,
                 span: f.span,
@@ -2240,6 +2245,11 @@ fn compile_statement(stmt: &Statement, ctx: &mut LowerCtx<'_>) -> Result<bool, L
                 key: "value".to_string(),
                 span: f.span,
             });
+            if f.is_await {
+                ctx.blocks[ctx.current_block]
+                    .ops
+                    .push(HirOp::Await { span: f.span });
+            }
             ctx.blocks[ctx.current_block].ops.push(HirOp::StoreLocal {
                 id: iter_value_slot,
                 span: f.span,
@@ -3448,6 +3458,9 @@ fn expr_to_binding_for_assign(expr: &Expression) -> Option<Binding> {
                 let ObjectPropertyOrSpread::Property(p) = po else {
                     return None;
                 };
+                if p.kind != ObjectPropertyKind::Data {
+                    return None;
+                }
                 let key_str = match &p.key {
                     ObjectPropertyKey::Static(s) => s.clone(),
                     ObjectPropertyKey::Computed(_) => return None,
@@ -6934,7 +6947,11 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                     return None;
                 };
                 match &p.key {
-                    ObjectPropertyKey::Static(key) if key == "__proto__" => Some(&p.value),
+                    ObjectPropertyKey::Static(key)
+                        if key == "__proto__" && p.kind == ObjectPropertyKind::Data =>
+                    {
+                        Some(&p.value)
+                    }
                     _ => None,
                 }
             });
