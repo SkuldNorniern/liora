@@ -1,9 +1,9 @@
 //! eval(x) - Execute code string in global scope. Minimal implementation for test262.
 use super::BuiltinContext;
-use crate::frontend::{check_early_errors, Parser};
+use crate::frontend::{Parser, check_early_errors};
 use crate::ir::{hir_to_bytecode, script_to_hir};
 use crate::runtime::Value;
-use crate::vm::{interpret_program_with_heap, Completion, Program};
+use crate::vm::{Completion, Program, interpret_program_with_heap};
 
 pub fn eval(args: &[Value], ctx: &mut BuiltinContext) -> Result<Value, super::BuiltinError> {
     let code = match args.first() {
@@ -46,22 +46,40 @@ pub fn eval(args: &[Value], ctx: &mut BuiltinContext) -> Result<Value, super::Bu
     let init_entry = funcs
         .iter()
         .position(|function| function.name.as_deref() == Some("__init__"));
-    let global_funcs: Vec<(String, usize)> = funcs
-        .iter()
-        .enumerate()
-        .filter_map(|(index, function)| {
-            function
-                .name
-                .as_ref()
-                .filter(|name| *name != "__init__")
-                .map(|name| (name.clone(), index))
-        })
-        .collect();
+
+    let global_object_id = ctx.heap.global_object();
+    for (index, function) in funcs.iter().enumerate() {
+        if index == entry {
+            continue;
+        }
+        let Some(name) = function.name.as_ref() else {
+            continue;
+        };
+        if name == "__init__" {
+            continue;
+        }
+        let dynamic_index = ctx.heap.dynamic_chunks.len();
+        ctx.heap.dynamic_chunks.push(chunks[index].clone());
+        if ctx.heap.dynamic_captures.len() <= dynamic_index {
+            ctx.heap
+                .dynamic_captures
+                .resize(dynamic_index + 1, Vec::new());
+        }
+        ctx.heap.dynamic_captures[dynamic_index] = Vec::new();
+        ctx.heap
+            .set_dynamic_function_prop(dynamic_index, "name", Value::String(name.clone()));
+        ctx.heap.set_prop(
+            global_object_id,
+            name,
+            Value::DynamicFunction(dynamic_index),
+        );
+    }
+
     let program = Program {
         chunks,
         entry,
         init_entry,
-        global_funcs,
+        global_funcs: Vec::new(),
     };
     match interpret_program_with_heap(&program, ctx.heap, false, None, false, false, None) {
         Ok(Completion::Return(v)) => Ok(v),

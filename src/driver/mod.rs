@@ -11,8 +11,14 @@ use std::sync::atomic::AtomicBool;
 #[derive(Debug)]
 pub enum DriverError {
     Backend(crate::backend::BackendError),
-    Diagnostic(Vec<Diagnostic>),
-    Parse(crate::frontend::ParseError),
+    Diagnostic {
+        diagnostics: Vec<Diagnostic>,
+        source: Option<String>,
+    },
+    Parse {
+        error: crate::frontend::ParseError,
+        source: Option<String>,
+    },
     Lower(crate::ir::LowerError),
 }
 
@@ -20,13 +26,19 @@ impl std::fmt::Display for DriverError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             DriverError::Backend(e) => write!(f, "{}", e),
-            DriverError::Diagnostic(diags) => {
-                for d in diags {
-                    write!(f, "{}", d.format(None))?;
+            DriverError::Diagnostic {
+                diagnostics,
+                source,
+            } => {
+                for d in diagnostics {
+                    write!(f, "{}", d.format(source.as_deref()))?;
                 }
                 Ok(())
             }
-            DriverError::Parse(e) => write!(f, "{}", e),
+            DriverError::Parse { error, source } => {
+                let diagnostic = Diagnostic::error(error.code, error.message.clone(), error.span);
+                write!(f, "{}", diagnostic.format(source.as_deref()))
+            }
             DriverError::Lower(e) => write!(f, "{}", e),
         }
     }
@@ -42,7 +54,10 @@ impl From<crate::backend::BackendError> for DriverError {
 
 impl From<crate::frontend::ParseError> for DriverError {
     fn from(e: crate::frontend::ParseError) -> Self {
-        DriverError::Parse(e)
+        DriverError::Parse {
+            error: e,
+            source: None,
+        }
     }
 }
 
@@ -54,7 +69,10 @@ impl From<crate::ir::LowerError> for DriverError {
 
 impl From<crate::vm::VmError> for DriverError {
     fn from(e: crate::vm::VmError) -> Self {
-        DriverError::Diagnostic(vec![crate::diagnostics::vm_error_to_diagnostic(&e)])
+        DriverError::Diagnostic {
+            diagnostics: vec![crate::diagnostics::vm_error_to_diagnostic(&e)],
+            source: None,
+        }
     }
 }
 
@@ -68,11 +86,15 @@ impl Driver {
 
     pub fn ast(source: &str) -> Result<crate::frontend::Script, DriverError> {
         let mut parser = Parser::new(source);
-        let script = parser.parse().map_err(DriverError::Parse)?;
+        let script = parser.parse().map_err(|error| DriverError::Parse {
+            error,
+            source: Some(source.to_string()),
+        })?;
         if let Err(early) = check_early_errors(&script) {
-            return Err(DriverError::Diagnostic(
-                early.into_iter().map(|e| e.to_diagnostic()).collect(),
-            ));
+            return Err(DriverError::Diagnostic {
+                diagnostics: early.into_iter().map(|e| e.to_diagnostic()).collect(),
+                source: Some(source.to_string()),
+            });
         }
         Ok(script)
     }
@@ -96,11 +118,14 @@ impl Driver {
             out.push('\n');
         }
         if out.is_empty() {
-            return Err(DriverError::Diagnostic(vec![Diagnostic::error(
-                ErrorCode::BcNoFunction,
-                "no function to compile",
-                None,
-            )]));
+            return Err(DriverError::Diagnostic {
+                diagnostics: vec![Diagnostic::error(
+                    ErrorCode::BcNoFunction,
+                    "no function to compile",
+                    None,
+                )],
+                source: Some(source.to_string()),
+            });
         }
         Ok(out)
     }
@@ -238,12 +263,13 @@ impl Driver {
         let entry = funcs
             .iter()
             .position(|f| f.name.as_deref() == Some("main"))
-            .ok_or_else(|| {
-                DriverError::Diagnostic(vec![Diagnostic::error(
+            .ok_or_else(|| DriverError::Diagnostic {
+                diagnostics: vec![Diagnostic::error(
                     ErrorCode::RunNoMain,
                     "no main function found",
                     None,
-                )])
+                )],
+                source: Some(source.to_string()),
             })?;
         let chunks: Vec<_> = funcs.iter().map(|f| hir_to_bytecode(f).chunk).collect();
         let init_entry = funcs
@@ -331,7 +357,10 @@ impl Driver {
                     .with_cause("an exception was thrown and not caught by try/catch")
                     .with_help("wrap the throwing code in try/catch or ensure errors are handled")
                 };
-                return Err(DriverError::Diagnostic(vec![diag]));
+                return Err(DriverError::Diagnostic {
+                    diagnostics: vec![diag],
+                    source: Some(source.to_string()),
+                });
             }
         };
         Ok(value)

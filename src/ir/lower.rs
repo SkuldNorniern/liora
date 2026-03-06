@@ -1672,6 +1672,7 @@ fn compile_statement(stmt: &Statement, ctx: &mut LowerCtx<'_>) -> Result<bool, L
         Statement::While(w) => {
             let cond_slot = ctx.next_slot;
             ctx.next_slot += 1;
+            let patch_start = ctx.blocks.len();
 
             let loop_id = ctx.blocks.len() as HirBlockId;
             ctx.blocks.push(HirBlock {
@@ -1697,9 +1698,10 @@ fn compile_statement(stmt: &Statement, ctx: &mut LowerCtx<'_>) -> Result<bool, L
 
             const WHILE_EXIT_PLACEHOLDER: HirBlockId = u32::MAX - 3;
             loop_stack_push(ctx, loop_id, WHILE_EXIT_PLACEHOLDER);
-            if let Some(label) = ctx.current_loop_label.take() {
+            let loop_label = ctx.current_loop_label.take();
+            if let Some(label) = loop_label.as_ref() {
                 ctx.label_map
-                    .insert(label, (loop_id, WHILE_EXIT_PLACEHOLDER));
+                    .insert(label.clone(), (loop_id, WHILE_EXIT_PLACEHOLDER));
             }
             ctx.current_block = body_id as usize;
             let body_exits = compile_statement(&w.body, ctx)?;
@@ -1716,7 +1718,7 @@ fn compile_statement(stmt: &Statement, ctx: &mut LowerCtx<'_>) -> Result<bool, L
                 terminator: HirTerminator::Jump { target: 0 },
             });
             let exit_id = ctx.blocks.len() as HirBlockId - 1;
-            for block in &mut ctx.blocks {
+            for block in ctx.blocks.iter_mut().skip(patch_start) {
                 match &mut block.terminator {
                     HirTerminator::Jump { target } => {
                         if *target == WHILE_EXIT_PLACEHOLDER {
@@ -1731,6 +1733,12 @@ fn compile_statement(stmt: &Statement, ctx: &mut LowerCtx<'_>) -> Result<bool, L
                     _ => {}
                 }
             }
+            if let Some(label) = loop_label
+                && let Some((_, exit)) = ctx.label_map.get_mut(&label)
+                && *exit == WHILE_EXIT_PLACEHOLDER
+            {
+                *exit = exit_id;
+            }
             ctx.blocks[loop_id as usize].terminator = HirTerminator::Branch {
                 cond: cond_slot,
                 then_block: body_id,
@@ -1742,6 +1750,7 @@ fn compile_statement(stmt: &Statement, ctx: &mut LowerCtx<'_>) -> Result<bool, L
         Statement::DoWhile(d) => {
             let cond_slot = ctx.next_slot;
             ctx.next_slot += 1;
+            let patch_start = ctx.blocks.len();
 
             let body_id = ctx.blocks.len() as HirBlockId;
             ctx.blocks.push(HirBlock {
@@ -1760,9 +1769,10 @@ fn compile_statement(stmt: &Statement, ctx: &mut LowerCtx<'_>) -> Result<bool, L
 
             const DOWHILE_EXIT_PLACEHOLDER: HirBlockId = u32::MAX - 4;
             loop_stack_push(ctx, cond_id, DOWHILE_EXIT_PLACEHOLDER);
-            if let Some(label) = ctx.current_loop_label.take() {
+            let loop_label = ctx.current_loop_label.take();
+            if let Some(label) = loop_label.as_ref() {
                 ctx.label_map
-                    .insert(label, (cond_id, DOWHILE_EXIT_PLACEHOLDER));
+                    .insert(label.clone(), (cond_id, DOWHILE_EXIT_PLACEHOLDER));
             }
             ctx.current_block = body_id as usize;
             let body_exits = compile_statement(&d.body, ctx)?;
@@ -1786,7 +1796,7 @@ fn compile_statement(stmt: &Statement, ctx: &mut LowerCtx<'_>) -> Result<bool, L
                 terminator: HirTerminator::Jump { target: 0 },
             });
             let exit_id = ctx.blocks.len() as HirBlockId - 1;
-            for block in &mut ctx.blocks {
+            for block in ctx.blocks.iter_mut().skip(patch_start) {
                 match &mut block.terminator {
                     HirTerminator::Jump { target } => {
                         if *target == DOWHILE_EXIT_PLACEHOLDER {
@@ -1800,6 +1810,12 @@ fn compile_statement(stmt: &Statement, ctx: &mut LowerCtx<'_>) -> Result<bool, L
                     }
                     _ => {}
                 }
+            }
+            if let Some(label) = loop_label
+                && let Some((_, exit)) = ctx.label_map.get_mut(&label)
+                && *exit == DOWHILE_EXIT_PLACEHOLDER
+            {
+                *exit = exit_id;
             }
             ctx.blocks[cond_id as usize].terminator = HirTerminator::Branch {
                 cond: cond_slot,
@@ -1876,6 +1892,7 @@ fn compile_statement(stmt: &Statement, ctx: &mut LowerCtx<'_>) -> Result<bool, L
         Statement::For(f) => {
             let cond_slot = ctx.next_slot;
             ctx.next_slot += 1;
+            let patch_start = ctx.blocks.len();
 
             if let Some(ref init) = f.init {
                 compile_statement(init, ctx)?;
@@ -1919,9 +1936,12 @@ fn compile_statement(stmt: &Statement, ctx: &mut LowerCtx<'_>) -> Result<bool, L
             };
 
             loop_stack_push(ctx, FOR_UPDATE_PLACEHOLDER, FOR_EXIT_PLACEHOLDER);
-            if let Some(label) = ctx.current_loop_label.take() {
-                ctx.label_map
-                    .insert(label, (FOR_UPDATE_PLACEHOLDER, FOR_EXIT_PLACEHOLDER));
+            let loop_label = ctx.current_loop_label.take();
+            if let Some(label) = loop_label.as_ref() {
+                ctx.label_map.insert(
+                    label.clone(),
+                    (FOR_UPDATE_PLACEHOLDER, FOR_EXIT_PLACEHOLDER),
+                );
             }
             ctx.current_block = body_id as usize;
             let body_exits = compile_statement(&f.body, ctx)?;
@@ -1956,7 +1976,7 @@ fn compile_statement(stmt: &Statement, ctx: &mut LowerCtx<'_>) -> Result<bool, L
             });
             let exit_id = ctx.blocks.len() as HirBlockId - 1;
 
-            for block in &mut ctx.blocks {
+            for block in ctx.blocks.iter_mut().skip(patch_start) {
                 match &mut block.terminator {
                     HirTerminator::Jump { target } => {
                         if *target == FOR_UPDATE_PLACEHOLDER {
@@ -1974,7 +1994,9 @@ fn compile_statement(stmt: &Statement, ctx: &mut LowerCtx<'_>) -> Result<bool, L
                 }
             }
 
-            for (_, (cont, exit)) in ctx.label_map.iter_mut() {
+            if let Some(label) = loop_label
+                && let Some((cont, exit)) = ctx.label_map.get_mut(&label)
+            {
                 if *cont == FOR_UPDATE_PLACEHOLDER {
                     *cont = update_id;
                 }
@@ -3615,6 +3637,78 @@ fn compile_array_hof(
     );
     op(ctx, HirOp::StoreLocal { id: len_slot, span });
 
+    if matches!(kind, HofKind::Filter) {
+        let buffer_slot = alloc_slot(ctx);
+        let detached_slot = alloc_slot(ctx);
+        let detached_throw_id = new_block(ctx, span);
+        let detached_continue_id = new_block(ctx, span);
+
+        op(ctx, HirOp::LoadLocal { id: arr_slot, span });
+        op(
+            ctx,
+            HirOp::GetProp {
+                key: "buffer".to_string(),
+                span,
+            },
+        );
+        op(
+            ctx,
+            HirOp::StoreLocal {
+                id: buffer_slot,
+                span,
+            },
+        );
+        op(
+            ctx,
+            HirOp::LoadLocal {
+                id: buffer_slot,
+                span,
+            },
+        );
+        op(
+            ctx,
+            HirOp::GetProp {
+                key: "__detached__".to_string(),
+                span,
+            },
+        );
+        op(
+            ctx,
+            HirOp::StoreLocal {
+                id: detached_slot,
+                span,
+            },
+        );
+        set_term(
+            ctx,
+            HirTerminator::Branch {
+                cond: detached_slot,
+                then_block: detached_throw_id,
+                else_block: detached_continue_id,
+            },
+        );
+
+        ctx.current_block = detached_throw_id as usize;
+        op(
+            ctx,
+            HirOp::LoadConst {
+                value: HirConst::String("detached ArrayBuffer".to_string()),
+                span,
+            },
+        );
+        op(
+            ctx,
+            HirOp::CallBuiltin {
+                builtin: b("Error", "TypeError"),
+                argc: 1,
+                span,
+            },
+        );
+        set_term(ctx, HirTerminator::Throw { span });
+
+        ctx.current_block = detached_continue_id as usize;
+    }
+
     let is_from_right = matches!(kind, HofKind::FindLast | HofKind::FindLastIndex);
 
     if is_from_right {
@@ -3770,14 +3864,6 @@ fn compile_array_hof(
             let truthy_slot = alloc_slot(ctx);
             op(ctx, HirOp::StoreLocal { id: call_res, span });
             op(ctx, HirOp::LoadLocal { id: call_res, span });
-            op(
-                ctx,
-                HirOp::LoadConst {
-                    value: HirConst::Bool(false),
-                    span,
-                },
-            );
-            op(ctx, HirOp::StrictNotEq { span });
             op(
                 ctx,
                 HirOp::StoreLocal {
@@ -4029,11 +4115,364 @@ fn compile_array_hof(
                 },
             );
         }
-        HofKind::Map | HofKind::Filter | HofKind::FlatMap => {
+        HofKind::Map | HofKind::FlatMap => {
             op(
                 ctx,
                 HirOp::LoadLocal {
                     id: result_slot,
+                    span,
+                },
+            );
+        }
+        HofKind::Filter => {
+            let output_slot = alloc_slot(ctx);
+            let kept_len_slot = alloc_slot(ctx);
+            let constructor_slot = alloc_slot(ctx);
+            let species_key_slot = alloc_slot(ctx);
+            let species_slot = alloc_slot(ctx);
+            let species_is_undefined_slot = alloc_slot(ctx);
+            let species_is_null_slot = alloc_slot(ctx);
+            let copy_index_slot = alloc_slot(ctx);
+            let copy_cond_slot = alloc_slot(ctx);
+            let copy_elem_slot = alloc_slot(ctx);
+
+            op(
+                ctx,
+                HirOp::LoadLocal {
+                    id: result_slot,
+                    span,
+                },
+            );
+            op(
+                ctx,
+                HirOp::GetProp {
+                    key: "length".to_string(),
+                    span,
+                },
+            );
+            op(
+                ctx,
+                HirOp::StoreLocal {
+                    id: kept_len_slot,
+                    span,
+                },
+            );
+
+            op(ctx, HirOp::LoadLocal { id: arr_slot, span });
+            op(
+                ctx,
+                HirOp::GetProp {
+                    key: "constructor".to_string(),
+                    span,
+                },
+            );
+            op(
+                ctx,
+                HirOp::StoreLocal {
+                    id: constructor_slot,
+                    span,
+                },
+            );
+
+            op(
+                ctx,
+                HirOp::LoadConst {
+                    value: HirConst::Global("Symbol".to_string()),
+                    span,
+                },
+            );
+            op(
+                ctx,
+                HirOp::GetProp {
+                    key: "species".to_string(),
+                    span,
+                },
+            );
+            op(
+                ctx,
+                HirOp::StoreLocal {
+                    id: species_key_slot,
+                    span,
+                },
+            );
+
+            op(
+                ctx,
+                HirOp::LoadLocal {
+                    id: constructor_slot,
+                    span,
+                },
+            );
+            op(
+                ctx,
+                HirOp::LoadLocal {
+                    id: species_key_slot,
+                    span,
+                },
+            );
+            op(ctx, HirOp::GetPropDyn { span });
+            op(
+                ctx,
+                HirOp::StoreLocal {
+                    id: species_slot,
+                    span,
+                },
+            );
+
+            op(
+                ctx,
+                HirOp::LoadLocal {
+                    id: species_slot,
+                    span,
+                },
+            );
+            op(
+                ctx,
+                HirOp::LoadConst {
+                    value: HirConst::Undefined,
+                    span,
+                },
+            );
+            op(ctx, HirOp::StrictEq { span });
+            op(
+                ctx,
+                HirOp::StoreLocal {
+                    id: species_is_undefined_slot,
+                    span,
+                },
+            );
+
+            let check_null_id = new_block(ctx, span);
+            let default_ctor_id = new_block(ctx, span);
+            let species_ctor_id = new_block(ctx, span);
+            let copy_init_id = new_block(ctx, span);
+            let copy_header_id = new_block(ctx, span);
+            let copy_body_id = new_block(ctx, span);
+            let copy_exit_id = new_block(ctx, span);
+
+            set_term(
+                ctx,
+                HirTerminator::Branch {
+                    cond: species_is_undefined_slot,
+                    then_block: default_ctor_id,
+                    else_block: check_null_id,
+                },
+            );
+
+            ctx.current_block = check_null_id as usize;
+            op(
+                ctx,
+                HirOp::LoadLocal {
+                    id: species_slot,
+                    span,
+                },
+            );
+            op(
+                ctx,
+                HirOp::LoadConst {
+                    value: HirConst::Null,
+                    span,
+                },
+            );
+            op(ctx, HirOp::StrictEq { span });
+            op(
+                ctx,
+                HirOp::StoreLocal {
+                    id: species_is_null_slot,
+                    span,
+                },
+            );
+            set_term(
+                ctx,
+                HirTerminator::Branch {
+                    cond: species_is_null_slot,
+                    then_block: default_ctor_id,
+                    else_block: species_ctor_id,
+                },
+            );
+
+            ctx.current_block = default_ctor_id as usize;
+            op(ctx, HirOp::NewArray { span });
+            op(
+                ctx,
+                HirOp::StoreLocal {
+                    id: output_slot,
+                    span,
+                },
+            );
+            set_term(
+                ctx,
+                HirTerminator::Jump {
+                    target: copy_init_id,
+                },
+            );
+
+            ctx.current_block = species_ctor_id as usize;
+            op(
+                ctx,
+                HirOp::LoadLocal {
+                    id: species_slot,
+                    span,
+                },
+            );
+            op(
+                ctx,
+                HirOp::LoadLocal {
+                    id: kept_len_slot,
+                    span,
+                },
+            );
+            op(ctx, HirOp::NewMethod { argc: 1, span });
+            op(
+                ctx,
+                HirOp::StoreLocal {
+                    id: output_slot,
+                    span,
+                },
+            );
+            set_term(
+                ctx,
+                HirTerminator::Jump {
+                    target: copy_init_id,
+                },
+            );
+
+            ctx.current_block = copy_init_id as usize;
+            op(
+                ctx,
+                HirOp::LoadConst {
+                    value: HirConst::Int(0),
+                    span,
+                },
+            );
+            op(
+                ctx,
+                HirOp::StoreLocal {
+                    id: copy_index_slot,
+                    span,
+                },
+            );
+            set_term(
+                ctx,
+                HirTerminator::Jump {
+                    target: copy_header_id,
+                },
+            );
+
+            ctx.current_block = copy_header_id as usize;
+            op(
+                ctx,
+                HirOp::LoadLocal {
+                    id: copy_index_slot,
+                    span,
+                },
+            );
+            op(
+                ctx,
+                HirOp::LoadLocal {
+                    id: kept_len_slot,
+                    span,
+                },
+            );
+            op(ctx, HirOp::Lt { span });
+            op(
+                ctx,
+                HirOp::StoreLocal {
+                    id: copy_cond_slot,
+                    span,
+                },
+            );
+            set_term(
+                ctx,
+                HirTerminator::Branch {
+                    cond: copy_cond_slot,
+                    then_block: copy_body_id,
+                    else_block: copy_exit_id,
+                },
+            );
+
+            ctx.current_block = copy_body_id as usize;
+            op(
+                ctx,
+                HirOp::LoadLocal {
+                    id: result_slot,
+                    span,
+                },
+            );
+            op(
+                ctx,
+                HirOp::LoadLocal {
+                    id: copy_index_slot,
+                    span,
+                },
+            );
+            op(ctx, HirOp::GetPropDyn { span });
+            op(
+                ctx,
+                HirOp::StoreLocal {
+                    id: copy_elem_slot,
+                    span,
+                },
+            );
+
+            op(
+                ctx,
+                HirOp::LoadLocal {
+                    id: output_slot,
+                    span,
+                },
+            );
+            op(
+                ctx,
+                HirOp::LoadLocal {
+                    id: copy_index_slot,
+                    span,
+                },
+            );
+            op(
+                ctx,
+                HirOp::LoadLocal {
+                    id: copy_elem_slot,
+                    span,
+                },
+            );
+            op(ctx, HirOp::SetPropDyn { span });
+            op(ctx, HirOp::Pop { span });
+
+            op(
+                ctx,
+                HirOp::LoadLocal {
+                    id: copy_index_slot,
+                    span,
+                },
+            );
+            op(
+                ctx,
+                HirOp::LoadConst {
+                    value: HirConst::Int(1),
+                    span,
+                },
+            );
+            op(ctx, HirOp::Add { span });
+            op(
+                ctx,
+                HirOp::StoreLocal {
+                    id: copy_index_slot,
+                    span,
+                },
+            );
+            set_term(
+                ctx,
+                HirTerminator::Jump {
+                    target: copy_header_id,
+                },
+            );
+
+            ctx.current_block = copy_exit_id as usize;
+            op(
+                ctx,
+                HirOp::LoadLocal {
+                    id: output_slot,
                     span,
                 },
             );
@@ -4228,6 +4667,7 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                 .push(HirOp::LoadThis { span: e.span });
         }
         Expression::Identifier(e) => {
+            let func_idx = func_index.get(&e.name).copied();
             if e.name == "undefined" {
                 ctx.blocks[ctx.current_block].ops.push(HirOp::LoadConst {
                     value: HirConst::Undefined,
@@ -4238,11 +4678,6 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                     id: slot,
                     span: e.span,
                 });
-            } else if let Some(&idx) = func_index.get(&e.name) {
-                ctx.blocks[ctx.current_block].ops.push(HirOp::LoadConst {
-                    value: HirConst::Function(idx),
-                    span: e.span,
-                });
             } else if GLOBAL_NAMES.contains(&e.name.as_str()) {
                 ctx.blocks[ctx.current_block].ops.push(HirOp::LoadConst {
                     value: HirConst::Global(e.name.clone()),
@@ -4251,6 +4686,11 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
             } else if let Some(slot) = get_or_alloc_capture_slot(ctx, &e.name) {
                 ctx.blocks[ctx.current_block].ops.push(HirOp::LoadLocal {
                     id: slot,
+                    span: e.span,
+                });
+            } else if let Some(idx) = func_idx {
+                ctx.blocks[ctx.current_block].ops.push(HirOp::LoadConst {
+                    value: HirConst::Function(idx),
                     span: e.span,
                 });
             } else if ctx.allow_function_captures {
@@ -4350,10 +4790,6 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                     else_block: else_id,
                 };
                 ctx.current_block = right_id as usize;
-                ctx.blocks[ctx.current_block].ops.push(HirOp::LoadLocal {
-                    id: result_slot,
-                    span: e.span,
-                });
                 ctx.blocks[ctx.current_block].terminator = HirTerminator::Jump { target: merge_id };
                 ctx.current_block = else_id as usize;
                 compile_expression(&e.right, ctx)?;
@@ -6057,14 +6493,29 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                         span: e.span,
                     });
                 } else if let Some(&idx) = func_index.get(&id.name) {
-                    for arg in &e.args {
-                        compile_call_arg(arg, ctx, e.span)?;
+                    if ctx.allow_function_captures {
+                        ctx.blocks[ctx.current_block].ops.push(HirOp::LoadConst {
+                            value: HirConst::Undefined,
+                            span: e.span,
+                        });
+                        compile_expression(&Expression::Identifier(id.clone()), ctx)?;
+                        for arg in &e.args {
+                            compile_call_arg(arg, ctx, e.span)?;
+                        }
+                        ctx.blocks[ctx.current_block].ops.push(HirOp::CallMethod {
+                            argc: e.args.len() as u32,
+                            span: e.span,
+                        });
+                    } else {
+                        for arg in &e.args {
+                            compile_call_arg(arg, ctx, e.span)?;
+                        }
+                        ctx.blocks[ctx.current_block].ops.push(HirOp::Call {
+                            func_index: idx,
+                            argc: e.args.len() as u32,
+                            span: e.span,
+                        });
                     }
-                    ctx.blocks[ctx.current_block].ops.push(HirOp::Call {
-                        func_index: idx,
-                        argc: e.args.len() as u32,
-                        span: e.span,
-                    });
                 } else if id.name == "Function" {
                     for arg in &e.args {
                         compile_call_arg(arg, ctx, e.span)?;
@@ -6434,14 +6885,25 @@ fn compile_expression(expr: &Expression, ctx: &mut LowerCtx<'_>) -> Result<(), L
                             .get(&id.name)
                             .or_else(|| ctx.func_index.get(&id.name))
                         {
-                            for arg in &n.args {
-                                compile_call_arg(arg, ctx, n.span)?;
+                            if ctx.allow_function_captures {
+                                compile_expression(&Expression::Identifier(id.clone()), ctx)?;
+                                for arg in &n.args {
+                                    compile_call_arg(arg, ctx, n.span)?;
+                                }
+                                ctx.blocks[ctx.current_block].ops.push(HirOp::NewMethod {
+                                    argc: n.args.len() as u32,
+                                    span: n.span,
+                                });
+                            } else {
+                                for arg in &n.args {
+                                    compile_call_arg(arg, ctx, n.span)?;
+                                }
+                                ctx.blocks[ctx.current_block].ops.push(HirOp::New {
+                                    func_index: idx,
+                                    argc: n.args.len() as u32,
+                                    span: n.span,
+                                });
                             }
-                            ctx.blocks[ctx.current_block].ops.push(HirOp::New {
-                                func_index: idx,
-                                argc: n.args.len() as u32,
-                                span: n.span,
-                            });
                         } else {
                             compile_expression(&Expression::Identifier(id.clone()), ctx)?;
                             for arg in &n.args {

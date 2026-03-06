@@ -302,6 +302,7 @@ fn check_statement(
             check_statement(&d.body, scope, &iter_ctx, errors);
         }
         Statement::For(f) => {
+            scope.enter_block();
             if let Some(ref init) = f.init {
                 check_statement(init, scope, ctx, errors);
             }
@@ -314,8 +315,10 @@ fn check_statement(
                 break_labels: ctx.break_labels.clone(),
             };
             check_statement(&f.body, scope, &iter_ctx, errors);
+            scope.leave_block();
         }
         Statement::ForIn(f) => {
+            scope.enter_block();
             match &f.left {
                 ForInOfLeft::LetDecl(n) | ForInOfLeft::ConstDecl(n) => {
                     if ctx.strict && is_strict_reserved(n) {
@@ -373,8 +376,10 @@ fn check_statement(
                 break_labels: ctx.break_labels.clone(),
             };
             check_statement(&f.body, scope, &iter_ctx, errors);
+            scope.leave_block();
         }
         Statement::ForOf(f) => {
+            scope.enter_block();
             match &f.left {
                 ForInOfLeft::LetDecl(n) | ForInOfLeft::ConstDecl(n) => {
                     if ctx.strict && is_strict_reserved(n) {
@@ -432,6 +437,7 @@ fn check_statement(
                 break_labels: ctx.break_labels.clone(),
             };
             check_statement(&f.body, scope, &iter_ctx, errors);
+            scope.leave_block();
         }
         Statement::Switch(s) => {
             let switch_ctx = CheckContext {
@@ -640,6 +646,18 @@ mod tests {
     #[test]
     fn check_non_strict_eval_ok() {
         let r = parse_and_check("function f(eval) { return eval; }");
+        assert!(r.is_ok());
+    }
+
+    #[test]
+    fn check_for_let_redeclaration_in_separate_loops_ok() {
+        let r = parse_and_check("for (let i = 0; i < 1; i++) {} for (let i = 0; i < 1; i++) {}");
+        assert!(r.is_ok());
+    }
+
+    #[test]
+    fn check_for_of_let_redeclaration_in_separate_loops_ok() {
+        let r = parse_and_check("for (let ctor of ctors) {} for (let ctor of ctors) {}");
         assert!(r.is_ok());
     }
 }

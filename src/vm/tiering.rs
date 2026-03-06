@@ -26,6 +26,7 @@ enum ChunkTierState {
 pub struct JitTiering {
     session: Option<JitSession>,
     hot_call_threshold: u32,
+    dynamic_key_base: usize,
     call_hot_counts: Vec<u32>,
     chunk_states: Vec<ChunkTierState>,
     stats: JitTieringStats,
@@ -41,6 +42,7 @@ impl JitTiering {
                 None
             },
             hot_call_threshold,
+            dynamic_key_base: program_chunk_count,
             call_hot_counts: vec![0; program_chunk_count],
             chunk_states: vec![ChunkTierState::Interpreting; program_chunk_count],
             stats: JitTieringStats {
@@ -58,6 +60,7 @@ impl JitTiering {
         args: &[Value],
         program_chunks: &[BytecodeChunk],
     ) -> Option<Value> {
+        self.ensure_tier_slot(func_idx);
         let jit = self.session.as_mut()?;
         let chunk_state = self.chunk_states.get_mut(func_idx)?;
 
@@ -95,6 +98,63 @@ impl JitTiering {
 
         self.stats.compile_attempts = self.stats.compile_attempts.saturating_add(1);
         match jit.try_compile_for_call(func_idx, chunk, args, program_chunks) {
+            Ok(Some(result)) => {
+                *chunk_state = ChunkTierState::Compiled;
+                self.stats.compile_successes = self.stats.compile_successes.saturating_add(1);
+                Some(Self::jit_i64_to_value(result))
+            }
+            Ok(None) | Err(_) => {
+                *chunk_state = ChunkTierState::Rejected;
+                self.stats.compile_rejections = self.stats.compile_rejections.saturating_add(1);
+                None
+            }
+        }
+    }
+
+    #[inline(always)]
+    pub fn maybe_execute_dynamic(
+        &mut self,
+        dynamic_chunk_idx: usize,
+        chunk: &BytecodeChunk,
+        args: &[Value],
+    ) -> Option<Value> {
+        let cache_key = self.dynamic_key_base.checked_add(dynamic_chunk_idx)?;
+        self.ensure_tier_slot(cache_key);
+        let jit = self.session.as_mut()?;
+        let chunk_state = self.chunk_states.get_mut(cache_key)?;
+
+        match chunk_state {
+            ChunkTierState::Compiled => {
+                if let Some(result) = jit.try_invoke_compiled_for_dynamic_call(cache_key, args) {
+                    self.stats.jit_invocations = self.stats.jit_invocations.saturating_add(1);
+                    return Some(Self::jit_i64_to_value(result));
+                }
+                return None;
+            }
+            ChunkTierState::Rejected => {
+                return None;
+            }
+            ChunkTierState::Interpreting => {}
+        }
+
+        if self.call_hot_counts.get(cache_key).copied() == Some(0)
+            && !Self::is_potentially_jittable(chunk)
+        {
+            *chunk_state = ChunkTierState::Rejected;
+            self.stats.precheck_rejections = self.stats.precheck_rejections.saturating_add(1);
+            return None;
+        }
+
+        let hot_count = self.call_hot_counts.get_mut(cache_key)?;
+        *hot_count = hot_count.saturating_add(1);
+        let should_attempt_compile = *hot_count >= self.hot_call_threshold
+            || (*hot_count == 1 && Self::should_attempt_early_compile(chunk));
+        if !should_attempt_compile {
+            return None;
+        }
+
+        self.stats.compile_attempts = self.stats.compile_attempts.saturating_add(1);
+        match jit.try_compile_for_dynamic_call(cache_key, chunk, args) {
             Ok(Some(result)) => {
                 *chunk_state = ChunkTierState::Compiled;
                 self.stats.compile_successes = self.stats.compile_successes.saturating_add(1);
@@ -153,6 +213,14 @@ impl JitTiering {
     #[inline(always)]
     fn jit_i64_to_value(result: i64) -> Value {
         Value::Int(result.clamp(i32::MIN as i64, i32::MAX as i64) as i32)
+    }
+
+    fn ensure_tier_slot(&mut self, slot: usize) {
+        if slot >= self.call_hot_counts.len() {
+            self.call_hot_counts.resize(slot + 1, 0);
+            self.chunk_states
+                .resize(slot + 1, ChunkTierState::Interpreting);
+        }
     }
 }
 
@@ -281,5 +349,35 @@ mod tests {
         let first_result = tiering.maybe_execute(0, &loop_chunk, &[], &program_chunks);
         assert_eq!(first_result, Some(Value::Int(19)));
         assert_eq!(tiering.chunk_states[0], ChunkTierState::Compiled);
+    }
+
+    #[test]
+    fn compiles_dynamic_chunk_without_captures() {
+        let mut tiering = JitTiering::new(0, true);
+        let chunk = BytecodeChunk {
+            code: vec![
+                Opcode::LoadLocal as u8,
+                0,
+                Opcode::PushConst as u8,
+                0,
+                Opcode::Add as u8,
+                Opcode::Return as u8,
+            ],
+            constants: vec![ConstEntry::Int(3)],
+            num_locals: 1,
+            named_locals: vec![],
+            captured_names: vec![],
+            rest_param_index: None,
+            handlers: vec![],
+            arguments_slot: None,
+            is_generator: false,
+            is_async: false,
+        };
+
+        let first = tiering.maybe_execute_dynamic(0, &chunk, &[Value::Int(4)]);
+        assert_eq!(first, Some(Value::Int(7)));
+
+        let second = tiering.maybe_execute_dynamic(0, &chunk, &[Value::Int(9)]);
+        assert_eq!(second, Some(Value::Int(12)));
     }
 }

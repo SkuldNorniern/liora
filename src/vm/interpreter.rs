@@ -2,7 +2,9 @@
 use crate::ir::bytecode::Opcode;
 use crate::ir::bytecode::{BytecodeChunk, ConstEntry};
 use crate::runtime::builtins;
+use crate::runtime::heap::DynamicCapture;
 use crate::runtime::{Heap, Value};
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::calls::{execute_builtin, pop_args, read_i16, read_u8, read_u16, setup_callee_locals};
@@ -16,6 +18,7 @@ use super::tiering::{JitTiering, JitTieringStats};
 use super::types::{BuiltinResult, Completion, Program, VmError};
 
 struct Frame {
+    id: usize,
     chunk_index: usize,
     is_dynamic: bool,
     pc: usize,
@@ -24,6 +27,8 @@ struct Frame {
     this_value: Value,
     rethrow_after_finally: bool,
     new_object: Option<usize>,
+    /// DynamicFunction id for this frame, used for capture write-back.
+    dynamic_function_id: Option<usize>,
     /// Set when this frame is executing a generator body. Index into heap.generator_states.
     generator_id: Option<usize>,
     /// Whether this frame is executing an async function body.
@@ -35,9 +40,10 @@ struct Frame {
 struct RunState<'a> {
     stack: Vec<Value>,
     frames: Vec<Frame>,
-    chunks_stack: Vec<BytecodeChunk>,
+    chunks_stack: Vec<Rc<BytecodeChunk>>,
     getprop_cache: GetPropCache,
     tiering: JitTiering,
+    next_frame_id: usize,
     jit_report: Option<&'a mut JitTieringStats>,
 }
 
@@ -50,6 +56,13 @@ impl<'a> Drop for RunState<'a> {
 }
 
 impl<'a> RunState<'a> {
+    #[inline(always)]
+    fn allocate_frame_id(&mut self) -> usize {
+        let id = self.next_frame_id;
+        self.next_frame_id += 1;
+        id
+    }
+
     #[inline(always)]
     fn set_local_at(&mut self, stack_base: usize, num_locals: usize, slot: usize, v: Value) {
         if slot < num_locals
@@ -70,6 +83,53 @@ impl<'a> RunState<'a> {
             self.stack.truncate(f.stack_base + f.num_locals);
         }
     }
+}
+
+enum ActiveChunk<'a> {
+    Program(&'a BytecodeChunk),
+    Dynamic(Rc<BytecodeChunk>),
+}
+
+impl<'a> ActiveChunk<'a> {
+    #[inline(always)]
+    fn as_chunk(&self) -> &BytecodeChunk {
+        match self {
+            Self::Program(chunk) => chunk,
+            Self::Dynamic(chunk) => chunk.as_ref(),
+        }
+    }
+}
+
+#[inline(always)]
+fn resolve_active_chunk<'a>(
+    program: &'a Program,
+    state: &RunState<'_>,
+    chunk_index: usize,
+    is_dynamic: bool,
+) -> Result<ActiveChunk<'a>, VmError> {
+    if is_dynamic {
+        let chunk = state
+            .chunks_stack
+            .get(chunk_index)
+            .cloned()
+            .ok_or(VmError::InvalidConstIndex(chunk_index))?;
+        Ok(ActiveChunk::Dynamic(chunk))
+    } else {
+        let chunk = program
+            .chunks
+            .get(chunk_index)
+            .ok_or(VmError::InvalidConstIndex(chunk_index))?;
+        Ok(ActiveChunk::Program(chunk))
+    }
+}
+
+#[inline(always)]
+fn dynamic_chunk_has_captures(heap: &Heap, dynamic_index: usize, chunk: &BytecodeChunk) -> bool {
+    !chunk.captured_names.is_empty()
+        || heap
+            .dynamic_captures
+            .get(dynamic_index)
+            .is_some_and(|captures| !captures.is_empty())
 }
 
 const CHECK_INTERVAL_MASK: u32 = CHECK_INTERVAL - 1;
@@ -280,18 +340,87 @@ pub fn interpret_program_with_heap(
 /// Throttle (cancel/cycle check) runs every CHECK_INTERVAL steps.
 /// Cycle detection catches infinite loops; cancel supports wall-clock timeout.
 const CHECK_INTERVAL: u32 = 1024;
-const CYCLE_BUFFER_SIZE: usize = 32;
 const CYCLE_THRESHOLD: usize = 3;
 
 #[inline(always)]
-fn hash_execution_state(chunk_index: usize, pc: usize, stack_len: usize, frames_len: usize) -> u64 {
-    (chunk_index as u64)
+fn value_fingerprint(value: &Value) -> u64 {
+    match value {
+        Value::Undefined => 0,
+        Value::Null => 1,
+        Value::Bool(b) => 2 + u64::from(*b),
+        Value::Int(n) => (*n as i64 as u64).wrapping_mul(0x9E37_79B1),
+        Value::Number(n) => n.to_bits(),
+        Value::BigInt(s) => {
+            let mut h = (s.len() as u64).wrapping_mul(131);
+            if let Some(first) = s.as_bytes().first() {
+                h = h.wrapping_mul(257).wrapping_add(*first as u64);
+            }
+            if let Some(last) = s.as_bytes().last() {
+                h = h.wrapping_mul(257).wrapping_add(*last as u64);
+            }
+            h
+        }
+        Value::String(s) => {
+            let mut h = (s.len() as u64).wrapping_mul(131).wrapping_add(17);
+            if let Some(first) = s.as_bytes().first() {
+                h = h.wrapping_mul(257).wrapping_add(*first as u64);
+            }
+            if let Some(last) = s.as_bytes().last() {
+                h = h.wrapping_mul(257).wrapping_add(*last as u64);
+            }
+            h
+        }
+        Value::Symbol(id) => 0x1000_0000_0000_0000 | (*id as u64),
+        Value::Object(id) => 0x2000_0000_0000_0000 | (*id as u64),
+        Value::Array(id) => 0x3000_0000_0000_0000 | (*id as u64),
+        Value::Map(id) => 0x4000_0000_0000_0000 | (*id as u64),
+        Value::Set(id) => 0x5000_0000_0000_0000 | (*id as u64),
+        Value::Date(id) => 0x6000_0000_0000_0000 | (*id as u64),
+        Value::Function(id) => 0x7000_0000_0000_0000 | (*id as u64),
+        Value::DynamicFunction(id) => 0x7100_0000_0000_0000 | (*id as u64),
+        Value::Builtin(id) => 0x7200_0000_0000_0000 | (*id as u64),
+        Value::BoundBuiltin(id, _, append_target) => {
+            0x7300_0000_0000_0000 | (*id as u64) | (u64::from(*append_target) << 8)
+        }
+        Value::BoundFunction(_, _, bound_args) => 0x7400_0000_0000_0000 | (bound_args.len() as u64),
+        Value::Generator(id) => 0x8000_0000_0000_0000 | (*id as u64),
+        Value::Promise(id) => 0x9000_0000_0000_0000 | (*id as u64),
+    }
+}
+
+#[inline(always)]
+fn hash_execution_state(
+    chunk_index: usize,
+    pc: usize,
+    stack_len: usize,
+    frames_len: usize,
+    stack: &[Value],
+    stack_base: usize,
+    num_locals: usize,
+) -> u64 {
+    let mut hash = (chunk_index as u64)
         .wrapping_mul(31)
         .wrapping_add(pc as u64)
         .wrapping_mul(31)
         .wrapping_add(stack_len as u64)
         .wrapping_mul(31)
-        .wrapping_add(frames_len as u64)
+        .wrapping_add(frames_len as u64);
+
+    if let Some(top) = stack.last() {
+        hash = hash.wrapping_mul(131).wrapping_add(value_fingerprint(top));
+    }
+
+    let local_count = num_locals.min(4);
+    for local_offset in 0..local_count {
+        let local_idx = stack_base + local_offset;
+        if let Some(local_value) = stack.get(local_idx) {
+            hash = hash
+                .wrapping_mul(131)
+                .wrapping_add(value_fingerprint(local_value));
+        }
+    }
+
+    hash
 }
 
 pub fn interpret_program_with_heap_and_entry(
@@ -330,6 +459,7 @@ pub fn interpret_program_with_heap_and_entry(
     let mut state = RunState {
         stack,
         frames: vec![Frame {
+            id: 0,
             chunk_index: entry,
             is_dynamic: false,
             pc: 0,
@@ -338,6 +468,7 @@ pub fn interpret_program_with_heap_and_entry(
             this_value: Value::Undefined,
             rethrow_after_finally: false,
             new_object: None,
+            dynamic_function_id: None,
             generator_id: None,
             is_async: entry_chunk.is_async,
         }],
@@ -347,12 +478,13 @@ pub fn interpret_program_with_heap_and_entry(
             program.chunks.len(),
             enable_jit && !trace && cancel.is_none(),
         ),
+        next_frame_id: 1,
         jit_report,
     };
 
     let mut loop_counter: u32 = 0;
-    let mut cycle_buffer: [u64; CYCLE_BUFFER_SIZE] = [0; CYCLE_BUFFER_SIZE];
-    let mut cycle_idx: usize = 0;
+    let mut previous_cycle_hash: Option<u64> = None;
+    let mut repeated_cycle_count: usize = 0;
 
     loop {
         let frames_len = state.frames.len();
@@ -383,33 +515,28 @@ pub fn interpret_program_with_heap_and_entry(
                 return Err(VmError::Cancelled);
             }
             if enable_infinite_loop_detection {
-                let h = hash_execution_state(chunk_index, pc, stack_len, frames_len);
-                cycle_buffer[cycle_idx] = h;
-                cycle_idx = (cycle_idx + 1) & (CYCLE_BUFFER_SIZE - 1);
-                let mut same_count = 0;
-                for x in &cycle_buffer {
-                    if *x == h {
-                        same_count += 1;
-                        if same_count >= CYCLE_THRESHOLD {
-                            return Err(VmError::InfiniteLoopDetected);
-                        }
+                let h = hash_execution_state(
+                    chunk_index,
+                    pc,
+                    stack_len,
+                    frames_len,
+                    &state.stack,
+                    stack_base,
+                    num_locals,
+                );
+                if previous_cycle_hash == Some(h) {
+                    repeated_cycle_count += 1;
+                    if repeated_cycle_count >= CYCLE_THRESHOLD {
+                        return Err(VmError::InfiniteLoopDetected);
                     }
+                } else {
+                    previous_cycle_hash = Some(h);
+                    repeated_cycle_count = 0;
                 }
             }
         }
-        let chunk = if is_dynamic {
-            state
-                .chunks_stack
-                .get(chunk_index)
-                .ok_or(VmError::InvalidConstIndex(chunk_index))?
-                .clone()
-        } else {
-            program
-                .chunks
-                .get(chunk_index)
-                .ok_or(VmError::InvalidConstIndex(chunk_index))?
-                .clone()
-        };
+        let active_chunk = resolve_active_chunk(program, &state, chunk_index, is_dynamic)?;
+        let chunk = active_chunk.as_chunk();
         let code = &chunk.code;
         let constants = &chunk.constants;
 
@@ -448,15 +575,15 @@ pub fn interpret_program_with_heap_and_entry(
                         if callee_chunk.captured_names.is_empty() {
                             Value::Function(*func_idx)
                         } else {
-                            let mut captured_slots: Vec<(u32, Value)> = Vec::new();
+                            let outer_frame_id = state.frames.get(frame_idx).map(|frame| frame.id);
+                            let mut captured_slots: Vec<DynamicCapture> = Vec::new();
                             for capture_name in &callee_chunk.captured_names {
                                 let outer_slot = chunk
                                     .named_locals
                                     .iter()
                                     .find_map(|(name, slot)| {
                                         (name == capture_name).then_some(*slot)
-                                    })
-                                    .map(|slot| slot as usize);
+                                    });
                                 let inner_slot =
                                     callee_chunk.named_locals.iter().find_map(|(name, slot)| {
                                         (name == capture_name).then_some(*slot)
@@ -464,6 +591,7 @@ pub fn interpret_program_with_heap_and_entry(
                                 if let Some(inner_slot) = inner_slot {
                                     let captured_value = outer_slot
                                         .map(|s| {
+                                            let s = s as usize;
                                             if s < num_locals {
                                                 state
                                                     .stack
@@ -475,7 +603,17 @@ pub fn interpret_program_with_heap_and_entry(
                                             }
                                         })
                                         .unwrap_or(Value::Undefined);
-                                    captured_slots.push((inner_slot, captured_value));
+                                    captured_slots.push(DynamicCapture {
+                                        name: capture_name.clone(),
+                                        inner_slot,
+                                        outer_slot,
+                                        outer_frame_id: if outer_slot.is_some() {
+                                            outer_frame_id
+                                        } else {
+                                            None
+                                        },
+                                        value: captured_value,
+                                    });
                                 }
                             }
                             let dynamic_index = heap.dynamic_chunks.len();
@@ -504,15 +642,15 @@ pub fn interpret_program_with_heap_and_entry(
                         if callee_chunk.captured_names.is_empty() {
                             Value::Function(*func_idx)
                         } else {
-                            let mut captured_slots: Vec<(u32, Value)> = Vec::new();
+                            let outer_frame_id = state.frames.get(frame_idx).map(|frame| frame.id);
+                            let mut captured_slots: Vec<DynamicCapture> = Vec::new();
                             for capture_name in &callee_chunk.captured_names {
                                 let outer_slot = chunk
                                     .named_locals
                                     .iter()
                                     .find_map(|(name, slot)| {
                                         (name == capture_name).then_some(*slot)
-                                    })
-                                    .map(|slot| slot as usize);
+                                    });
                                 let inner_slot =
                                     callee_chunk.named_locals.iter().find_map(|(name, slot)| {
                                         (name == capture_name).then_some(*slot)
@@ -520,6 +658,7 @@ pub fn interpret_program_with_heap_and_entry(
                                 if let Some(inner_slot) = inner_slot {
                                     let captured_value = outer_slot
                                         .map(|s| {
+                                            let s = s as usize;
                                             if s < num_locals {
                                                 state
                                                     .stack
@@ -531,7 +670,17 @@ pub fn interpret_program_with_heap_and_entry(
                                             }
                                         })
                                         .unwrap_or(Value::Undefined);
-                                    captured_slots.push((inner_slot, captured_value));
+                                    captured_slots.push(DynamicCapture {
+                                        name: capture_name.clone(),
+                                        inner_slot,
+                                        outer_slot,
+                                        outer_frame_id: if outer_slot.is_some() {
+                                            outer_frame_id
+                                        } else {
+                                            None
+                                        },
+                                        value: captured_value,
+                                    });
                                 }
                             }
                             let dynamic_index = heap.dynamic_chunks.len();
@@ -812,9 +961,51 @@ pub fn interpret_program_with_heap_and_entry(
 
             // ---- Control flow: Return / Throw / Finally ----
             0x20 => {
-                let val = state.stack.pop().unwrap_or(Value::Undefined);
                 let popped = state.frames.pop();
                 let callee_stack_base = popped.as_ref().map(|f| f.stack_base).unwrap_or(0);
+                let callee_locals_top = popped
+                    .as_ref()
+                    .map(|f| f.stack_base + f.num_locals)
+                    .unwrap_or(0);
+                let val = if state.stack.len() > callee_locals_top {
+                    state.stack.pop().unwrap_or(Value::Undefined)
+                } else {
+                    Value::Undefined
+                };
+                if let Some(ref f) = popped
+                    && let Some(dynamic_function_id) = f.dynamic_function_id
+                {
+                    if let Some(captures) = heap.dynamic_captures.get_mut(dynamic_function_id) {
+                        for capture in captures.iter_mut() {
+                            let inner_index = f.stack_base + capture.inner_slot as usize;
+                            let captured_value = state
+                                .stack
+                                .get(inner_index)
+                                .cloned()
+                                .unwrap_or(Value::Undefined);
+                            capture.value = captured_value.clone();
+                            if let (Some(outer_slot), Some(outer_frame_id)) =
+                                (capture.outer_slot, capture.outer_frame_id)
+                            {
+                                let outer_frame = state
+                                    .frames
+                                    .iter()
+                                    .rev()
+                                    .find(|frame| frame.id == outer_frame_id)
+                                    .map(|frame| (frame.stack_base, frame.num_locals));
+                                if let Some((outer_base, outer_locals)) = outer_frame {
+                                    let outer_slot = outer_slot as usize;
+                                    if outer_slot < outer_locals {
+                                        let outer_index = outer_base + outer_slot;
+                                        if let Some(slot) = state.stack.get_mut(outer_index) {
+                                            *slot = captured_value.clone();
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
                 if let Some(ref f) = popped
                     && f.is_dynamic
                 {
@@ -836,7 +1027,21 @@ pub fn interpret_program_with_heap_and_entry(
                             heap.alloc_promise(crate::runtime::PromiseState::Fulfilled(val));
                         Value::Promise(promise_id)
                     } else if let Some(obj_id) = f.new_object {
-                        if matches!(val, Value::Object(_)) {
+                        if matches!(
+                            val,
+                            Value::Object(_)
+                                | Value::Array(_)
+                                | Value::Map(_)
+                                | Value::Set(_)
+                                | Value::Date(_)
+                                | Value::Function(_)
+                                | Value::DynamicFunction(_)
+                                | Value::Builtin(_)
+                                | Value::BoundBuiltin(_, _, _)
+                                | Value::BoundFunction(_, _, _)
+                                | Value::Generator(_)
+                                | Value::Promise(_)
+                        ) {
                             val
                         } else {
                             Value::Object(obj_id)
@@ -883,18 +1088,11 @@ pub fn interpret_program_with_heap_and_entry(
                                 f.num_locals,
                             )
                         };
-                        let caller_chunk = if is_dyn {
-                            state
-                                .chunks_stack
-                                .get(caller_chunk_idx)
-                                .ok_or(VmError::InvalidConstIndex(caller_chunk_idx))?
-                        } else {
-                            program
-                                .chunks
-                                .get(caller_chunk_idx)
-                                .ok_or(VmError::InvalidConstIndex(caller_chunk_idx))?
-                        };
-                        if let Some((hpc, slot, is_fin)) = find_handler(caller_chunk, caller_pc) {
+                        let caller_chunk =
+                            resolve_active_chunk(program, &state, caller_chunk_idx, is_dyn)?;
+                        if let Some((hpc, slot, is_fin)) =
+                            find_handler(caller_chunk.as_chunk(), caller_pc)
+                        {
                             state.set_local_at(stack_base, num_locals, slot, thrown_val.clone());
                             state.frames[caller_idx].rethrow_after_finally = is_fin;
                             state.frames[caller_idx].pc = hpc;
@@ -936,18 +1134,11 @@ pub fn interpret_program_with_heap_and_entry(
                                 f.num_locals,
                             )
                         };
-                        let caller_chunk = if is_dyn {
-                            state
-                                .chunks_stack
-                                .get(caller_chunk_idx)
-                                .ok_or(VmError::InvalidConstIndex(caller_chunk_idx))?
-                        } else {
-                            program
-                                .chunks
-                                .get(caller_chunk_idx)
-                                .ok_or(VmError::InvalidConstIndex(caller_chunk_idx))?
-                        };
-                        if let Some((hpc, slot, is_fin)) = find_handler(caller_chunk, caller_pc) {
+                        let caller_chunk =
+                            resolve_active_chunk(program, &state, caller_chunk_idx, is_dyn)?;
+                        if let Some((hpc, slot, is_fin)) =
+                            find_handler(caller_chunk.as_chunk(), caller_pc)
+                        {
                             state.set_local_at(stack_base, num_locals, slot, thrown_val.clone());
                             state.frames[caller_idx].rethrow_after_finally = is_fin;
                             state.frames[caller_idx].pc = hpc;
@@ -1020,7 +1211,9 @@ pub fn interpret_program_with_heap_and_entry(
                 let num_locals = callee_locals.len();
                 let stack_base = state.stack.len();
                 state.stack.extend(callee_locals);
+                let frame_id = state.allocate_frame_id();
                 state.frames.push(Frame {
+                    id: frame_id,
                     chunk_index: func_idx,
                     is_dynamic: false,
                     pc: 0,
@@ -1029,6 +1222,7 @@ pub fn interpret_program_with_heap_and_entry(
                     this_value: Value::Undefined,
                     rethrow_after_finally: false,
                     new_object: None,
+                    dynamic_function_id: None,
                     generator_id: None,
                     is_async: chunk_is_async,
                 });
@@ -1062,15 +1256,7 @@ pub fn interpret_program_with_heap_and_entry(
                         new_object,
                     }) => {
                         if let Some(c) = handle_apply_invoke(
-                            program,
-                            heap,
-                            &mut state,
-                            chunk_index,
-                            is_dynamic,
-                            call_pc,
-                            callee,
-                            this_arg,
-                            args,
+                            program, heap, &mut state, chunk, call_pc, callee, this_arg, args,
                             new_object,
                         )? {
                             return Ok(c);
@@ -1111,27 +1297,38 @@ pub fn interpret_program_with_heap_and_entry(
                 let receiver = state.stack.pop().ok_or_else(underflow)?;
                 match callee {
                     Value::Builtin(builtin_id) => {
-                        state.stack.push(receiver);
+                        let name = builtins::name(builtin_id);
+                        let is_typed_array_constructor = builtins::category(builtin_id) == "TypedArray"
+                            && matches!(
+                                name,
+                                "Int32Array"
+                                    | "Uint8Array"
+                                    | "Uint8ClampedArray"
+                                    | "ArrayBuffer"
+                                    | "DataView"
+                            );
+                        if !is_typed_array_constructor {
+                            state.stack.push(receiver);
+                        }
                         for a in &args {
                             state.stack.push(a.clone());
                         }
                         let mut ctx = builtins::BuiltinContext { heap };
-                        match execute_builtin(builtin_id, argc + 1, &mut state.stack, &mut ctx) {
+                        let call_argc = if is_typed_array_constructor {
+                            argc
+                        } else {
+                            argc + 1
+                        };
+                        match execute_builtin(builtin_id, call_argc, &mut state.stack, &mut ctx) {
                             Ok(BuiltinResult::Push(v)) => {
                                 state.getprop_cache.invalidate_all();
                                 state.stack.push(v);
                             }
                             Ok(BuiltinResult::Throw(v)) => {
                                 let thrown = normalize_builtin_throw_value(heap, v);
-                                if let Some(completion) =
-                                    propagate_call_throw(
-                                        program,
-                                        &mut state,
-                                        &chunk,
-                                        call_pc,
-                                        thrown,
-                                    )?
-                                {
+                                if let Some(completion) = propagate_call_throw(
+                                    program, &mut state, &chunk, call_pc, thrown,
+                                )? {
                                     return Ok(completion);
                                 }
                                 continue;
@@ -1143,16 +1340,8 @@ pub fn interpret_program_with_heap_and_entry(
                                 new_object,
                             }) => {
                                 if let Some(c) = handle_apply_invoke(
-                                    program,
-                                    heap,
-                                    &mut state,
-                                    chunk_index,
-                                    is_dynamic,
-                                    call_pc,
-                                    callee,
-                                    this_arg,
-                                    args,
-                                    new_object,
+                                    program, heap, &mut state, chunk, call_pc, callee, this_arg,
+                                    args, new_object,
                                 )? {
                                     return Ok(c);
                                 }
@@ -1173,21 +1362,38 @@ pub fn interpret_program_with_heap_and_entry(
                             .get(heap_idx)
                             .ok_or(VmError::InvalidConstIndex(heap_idx))?
                             .clone();
+                        if !dynamic_chunk_has_captures(heap, heap_idx, &callee_chunk)
+                            && let Some(value) =
+                                state
+                                    .tiering
+                                    .maybe_execute_dynamic(heap_idx, &callee_chunk, &args)
+                        {
+                            state.stack.push(value);
+                            state.frames[frame_idx].pc = pc;
+                            continue;
+                        }
                         let chunk_is_async = callee_chunk.is_async;
                         let callee_locals = setup_callee_locals(&callee_chunk, &args, heap);
                         let num_locals = callee_locals.len();
                         let stack_base = state.stack.len();
-                        let captured: Vec<(u32, Value)> = heap
+                        let captured: Vec<DynamicCapture> = heap
                             .dynamic_captures
                             .get(heap_idx)
                             .cloned()
                             .unwrap_or_default();
                         state.stack.extend(callee_locals);
-                        for (slot, value) in captured {
-                            state.set_local_at(stack_base, num_locals, slot as usize, value);
+                        for capture in captured {
+                            state.set_local_at(
+                                stack_base,
+                                num_locals,
+                                capture.inner_slot as usize,
+                                capture.value,
+                            );
                         }
-                        state.chunks_stack.push(callee_chunk);
+                        state.chunks_stack.push(Rc::new(callee_chunk));
+                        let frame_id = state.allocate_frame_id();
                         state.frames.push(Frame {
+                            id: frame_id,
                             chunk_index: state.chunks_stack.len() - 1,
                             is_dynamic: true,
                             pc: 0,
@@ -1196,6 +1402,7 @@ pub fn interpret_program_with_heap_and_entry(
                             this_value: receiver,
                             rethrow_after_finally: false,
                             new_object: None,
+                            dynamic_function_id: Some(heap_idx),
                             generator_id: None,
                             is_async: chunk_is_async,
                         });
@@ -1221,7 +1428,9 @@ pub fn interpret_program_with_heap_and_entry(
                         let callee_locals = setup_callee_locals(callee_chunk, &args, heap);
                         let callee_stack_base = state.stack.len();
                         state.stack.extend(callee_locals);
+                        let frame_id = state.allocate_frame_id();
                         state.frames.push(Frame {
+                            id: frame_id,
                             chunk_index: func_idx,
                             is_dynamic: false,
                             pc: 0,
@@ -1230,6 +1439,7 @@ pub fn interpret_program_with_heap_and_entry(
                             this_value: receiver,
                             rethrow_after_finally: false,
                             new_object: None,
+                            dynamic_function_id: None,
                             generator_id: None,
                             is_async: chunk_is_async,
                         });
@@ -1241,8 +1451,7 @@ pub fn interpret_program_with_heap_and_entry(
                             program,
                             heap,
                             &mut state,
-                            chunk_index,
-                            is_dynamic,
+                            chunk,
                             call_pc,
                             target.as_ref().clone(),
                             bound_this.as_ref().clone(),
@@ -1278,15 +1487,9 @@ pub fn interpret_program_with_heap_and_entry(
                             }
                             Ok(BuiltinResult::Throw(v)) => {
                                 let thrown = normalize_builtin_throw_value(heap, v);
-                                if let Some(completion) =
-                                    propagate_call_throw(
-                                        program,
-                                        &mut state,
-                                        &chunk,
-                                        call_pc,
-                                        thrown,
-                                    )?
-                                {
+                                if let Some(completion) = propagate_call_throw(
+                                    program, &mut state, &chunk, call_pc, thrown,
+                                )? {
                                     return Ok(completion);
                                 }
                                 continue;
@@ -1298,16 +1501,8 @@ pub fn interpret_program_with_heap_and_entry(
                                 new_object,
                             }) => {
                                 if let Some(c) = handle_apply_invoke(
-                                    program,
-                                    heap,
-                                    &mut state,
-                                    chunk_index,
-                                    is_dynamic,
-                                    call_pc,
-                                    callee,
-                                    this_arg,
-                                    args,
-                                    new_object,
+                                    program, heap, &mut state, chunk, call_pc, callee, this_arg,
+                                    args, new_object,
                                 )? {
                                     return Ok(c);
                                 }
@@ -1351,16 +1546,8 @@ pub fn interpret_program_with_heap_and_entry(
                                     new_object,
                                 }) => {
                                     if let Some(c) = handle_apply_invoke(
-                                        program,
-                                        heap,
-                                        &mut state,
-                                        chunk_index,
-                                        is_dynamic,
-                                        call_pc,
-                                        callee,
-                                        this_arg,
-                                        args,
-                                        new_object,
+                                        program, heap, &mut state, chunk, call_pc, callee,
+                                        this_arg, args, new_object,
                                     )? {
                                         return Ok(c);
                                     }
@@ -1382,13 +1569,9 @@ pub fn interpret_program_with_heap_and_entry(
                                 "TypeError",
                                 "callee is not a function (got object)".to_string(),
                             );
-                            if let Some(completion) = propagate_call_throw(
-                                program,
-                                &mut state,
-                                &chunk,
-                                call_pc,
-                                thrown,
-                            )? {
+                            if let Some(completion) =
+                                propagate_call_throw(program, &mut state, &chunk, call_pc, thrown)?
+                            {
                                 return Ok(completion);
                             }
                             continue;
@@ -1398,18 +1581,11 @@ pub fn interpret_program_with_heap_and_entry(
                         let thrown = create_native_error(
                             heap,
                             "TypeError",
-                            format!(
-                                "callee is not a function (got {})",
-                                callee.type_name_for_error(),
-                            ),
+                            format!("callee is not a function (got {})", callee.type_name_for_error(),),
                         );
-                        if let Some(completion) = propagate_call_throw(
-                            program,
-                            &mut state,
-                            &chunk,
-                            call_pc,
-                            thrown,
-                        )? {
+                        if let Some(completion) =
+                            propagate_call_throw(program, &mut state, &chunk, call_pc, thrown)?
+                        {
                             return Ok(completion);
                         }
                         continue;
@@ -1426,17 +1602,15 @@ pub fn interpret_program_with_heap_and_entry(
                     .chunks
                     .get(func_idx)
                     .ok_or(VmError::InvalidConstIndex(func_idx))?;
-                let proto = heap.get_function_prop(func_idx, "prototype");
-                let obj_id = if let Value::Object(proto_id) = proto {
-                    heap.alloc_object_with_prototype(Some(proto_id))
-                } else {
-                    heap.alloc_object()
-                };
+                let prototype_id = heap.ensure_function_prototype(func_idx);
+                let obj_id = heap.alloc_object_with_prototype(Some(prototype_id));
                 let args = pop_args(&mut state.stack, argc)?;
                 let callee_locals = setup_callee_locals(callee, &args, heap);
                 let stack_base = state.stack.len();
                 state.stack.extend(callee_locals);
+                let frame_id = state.allocate_frame_id();
                 state.frames.push(Frame {
+                    id: frame_id,
                     chunk_index: func_idx,
                     is_dynamic: false,
                     pc: 0,
@@ -1445,6 +1619,7 @@ pub fn interpret_program_with_heap_and_entry(
                     this_value: Value::Object(obj_id),
                     rethrow_after_finally: false,
                     new_object: Some(obj_id),
+                    dynamic_function_id: None,
                     generator_id: None,
                     is_async: false,
                 });
@@ -1458,20 +1633,12 @@ pub fn interpret_program_with_heap_and_entry(
                 let callee = state.stack.pop().ok_or_else(underflow)?;
                 let obj_id = match &callee {
                     Value::Function(func_idx) => {
-                        let proto = heap.get_function_prop(*func_idx, "prototype");
-                        if let Value::Object(proto_id) = proto {
-                            heap.alloc_object_with_prototype(Some(proto_id))
-                        } else {
-                            heap.alloc_object()
-                        }
+                        let prototype_id = heap.ensure_function_prototype(*func_idx);
+                        heap.alloc_object_with_prototype(Some(prototype_id))
                     }
                     Value::DynamicFunction(dyn_idx) => {
-                        let proto = heap.get_dynamic_function_prop(*dyn_idx, "prototype");
-                        if let Value::Object(proto_id) = proto {
-                            heap.alloc_object_with_prototype(Some(proto_id))
-                        } else {
-                            heap.alloc_object()
-                        }
+                        let prototype_id = heap.ensure_dynamic_function_prototype(*dyn_idx);
+                        heap.alloc_object_with_prototype(Some(prototype_id))
                     }
                     _ => heap.alloc_object(),
                 };
@@ -1490,15 +1657,9 @@ pub fn interpret_program_with_heap_and_entry(
                             }
                             Ok(BuiltinResult::Throw(v)) => {
                                 let thrown = normalize_builtin_throw_value(heap, v);
-                                if let Some(completion) =
-                                    propagate_call_throw(
-                                        program,
-                                        &mut state,
-                                        &chunk,
-                                        trace_pc,
-                                        thrown,
-                                    )?
-                                {
+                                if let Some(completion) = propagate_call_throw(
+                                    program, &mut state, &chunk, trace_pc, thrown,
+                                )? {
                                     return Ok(completion);
                                 }
                                 continue;
@@ -1510,16 +1671,8 @@ pub fn interpret_program_with_heap_and_entry(
                                 new_object,
                             }) => {
                                 if let Some(c) = handle_apply_invoke(
-                                    program,
-                                    heap,
-                                    &mut state,
-                                    chunk_index,
-                                    is_dynamic,
-                                    trace_pc,
-                                    callee,
-                                    this_arg,
-                                    args,
-                                    new_object,
+                                    program, heap, &mut state, chunk, trace_pc, callee, this_arg,
+                                    args, new_object,
                                 )? {
                                     return Ok(c);
                                 }
@@ -1543,17 +1696,24 @@ pub fn interpret_program_with_heap_and_entry(
                         let callee_locals = setup_callee_locals(&callee_chunk, &args, heap);
                         let num_locals = callee_locals.len();
                         let stack_base = state.stack.len();
-                        let captured: Vec<(u32, Value)> = heap
+                        let captured: Vec<DynamicCapture> = heap
                             .dynamic_captures
                             .get(heap_idx)
                             .cloned()
                             .unwrap_or_default();
                         state.stack.extend(callee_locals);
-                        for (slot, value) in captured {
-                            state.set_local_at(stack_base, num_locals, slot as usize, value);
+                        for capture in captured {
+                            state.set_local_at(
+                                stack_base,
+                                num_locals,
+                                capture.inner_slot as usize,
+                                capture.value,
+                            );
                         }
-                        state.chunks_stack.push(callee_chunk);
+                        state.chunks_stack.push(Rc::new(callee_chunk));
+                        let frame_id = state.allocate_frame_id();
                         state.frames.push(Frame {
+                            id: frame_id,
                             chunk_index: state.chunks_stack.len() - 1,
                             is_dynamic: true,
                             pc: 0,
@@ -1562,6 +1722,7 @@ pub fn interpret_program_with_heap_and_entry(
                             this_value: receiver,
                             rethrow_after_finally: false,
                             new_object: Some(obj_id),
+                            dynamic_function_id: Some(heap_idx),
                             generator_id: None,
                             is_async: false,
                         });
@@ -1574,7 +1735,9 @@ pub fn interpret_program_with_heap_and_entry(
                         let callee_locals = setup_callee_locals(callee_chunk, &args, heap);
                         let stack_base = state.stack.len();
                         state.stack.extend(callee_locals);
+                        let frame_id = state.allocate_frame_id();
                         state.frames.push(Frame {
+                            id: frame_id,
                             chunk_index: func_idx,
                             is_dynamic: false,
                             pc: 0,
@@ -1583,6 +1746,7 @@ pub fn interpret_program_with_heap_and_entry(
                             this_value: receiver,
                             rethrow_after_finally: false,
                             new_object: Some(obj_id),
+                            dynamic_function_id: None,
                             generator_id: None,
                             is_async: false,
                         });
@@ -1594,8 +1758,7 @@ pub fn interpret_program_with_heap_and_entry(
                             program,
                             heap,
                             &mut state,
-                            chunk_index,
-                            is_dynamic,
+                            chunk,
                             trace_pc,
                             target.as_ref().clone(),
                             receiver,
@@ -1647,16 +1810,8 @@ pub fn interpret_program_with_heap_and_entry(
                                     new_object,
                                 }) => {
                                     if let Some(c) = handle_apply_invoke(
-                                        program,
-                                        heap,
-                                        &mut state,
-                                        chunk_index,
-                                        is_dynamic,
-                                        trace_pc,
-                                        callee,
-                                        this_arg,
-                                        args,
-                                        new_object,
+                                        program, heap, &mut state, chunk, trace_pc, callee,
+                                        this_arg, args, new_object,
                                     )? {
                                         return Ok(c);
                                     }
@@ -1678,13 +1833,9 @@ pub fn interpret_program_with_heap_and_entry(
                                 "TypeError",
                                 "callee is not a function (got object)".to_string(),
                             );
-                            if let Some(completion) = propagate_call_throw(
-                                program,
-                                &mut state,
-                                &chunk,
-                                trace_pc,
-                                thrown,
-                            )? {
+                            if let Some(completion) =
+                                propagate_call_throw(program, &mut state, &chunk, trace_pc, thrown)?
+                            {
                                 return Ok(completion);
                             }
                             continue;
@@ -1694,18 +1845,11 @@ pub fn interpret_program_with_heap_and_entry(
                         let thrown = create_native_error(
                             heap,
                             "TypeError",
-                            format!(
-                                "callee is not a function (got {})",
-                                callee.type_name_for_error(),
-                            ),
+                            format!("callee is not a function (got {})", callee.type_name_for_error(),),
                         );
-                        if let Some(completion) = propagate_call_throw(
-                            program,
-                            &mut state,
-                            &chunk,
-                            trace_pc,
-                            thrown,
-                        )? {
+                        if let Some(completion) =
+                            propagate_call_throw(program, &mut state, &chunk, trace_pc, thrown)?
+                        {
                             return Ok(completion);
                         }
                         continue;
@@ -2007,19 +2151,12 @@ fn propagate_call_throw(
                 frame.num_locals,
             )
         };
-        let caller_chunk = if caller_is_dynamic {
-            state
-                .chunks_stack
-                .get(caller_chunk_index)
-                .ok_or(VmError::InvalidConstIndex(caller_chunk_index))?
-        } else {
-            program
-                .chunks
-                .get(caller_chunk_index)
-                .ok_or(VmError::InvalidConstIndex(caller_chunk_index))?
-        };
+        let caller_chunk =
+            resolve_active_chunk(program, state, caller_chunk_index, caller_is_dynamic)?;
 
-        if let Some((handler_pc, slot, is_finally)) = find_handler(caller_chunk, caller_pc) {
+        if let Some((handler_pc, slot, is_finally)) =
+            find_handler(caller_chunk.as_chunk(), caller_pc)
+        {
             state.set_local_at(stack_base, num_locals, slot, uncaught_value.clone());
             state.frames[caller_index].rethrow_after_finally = is_finally;
             state.frames[caller_index].pc = handler_pc;
@@ -2033,27 +2170,13 @@ fn handle_apply_invoke(
     program: &Program,
     heap: &mut Heap,
     state: &mut RunState,
-    chunk_index: usize,
-    is_dynamic: bool,
+    current_chunk: &BytecodeChunk,
     call_pc: usize,
     mut callee: Value,
     mut this_arg: Value,
     mut args: Vec<Value>,
     mut new_object: Option<usize>,
 ) -> Result<Option<Completion>, VmError> {
-    let chunk = if is_dynamic {
-        state
-            .chunks_stack
-            .get(chunk_index)
-            .ok_or(VmError::InvalidConstIndex(chunk_index))?
-            .clone()
-    } else {
-        program
-            .chunks
-            .get(chunk_index)
-            .ok_or(VmError::InvalidConstIndex(chunk_index))?
-            .clone()
-    };
     loop {
         let bind_unwrap = match &callee {
             Value::BoundFunction(target, bound_this, bound_args) => {
@@ -2085,7 +2208,7 @@ fn handle_apply_invoke(
                     Ok(BuiltinResult::Throw(v)) => {
                         let thrown = normalize_builtin_throw_value(heap, v);
                         if let Some(completion) =
-                            propagate_call_throw(program, state, &chunk, call_pc, thrown)?
+                            propagate_call_throw(program, state, current_chunk, call_pc, thrown)?
                         {
                             return Ok(Some(completion));
                         }
@@ -2127,21 +2250,37 @@ fn handle_apply_invoke(
                     state.stack.push(Value::Generator(gen_id));
                     return Ok(None);
                 }
+                if !dynamic_chunk_has_captures(heap, *heap_idx, &callee_chunk)
+                    && let Some(value) =
+                        state
+                            .tiering
+                            .maybe_execute_dynamic(*heap_idx, &callee_chunk, &args)
+                {
+                    state.stack.push(value);
+                    return Ok(None);
+                }
                 let chunk_is_async = callee_chunk.is_async;
                 let callee_locals = setup_callee_locals(&callee_chunk, &args, heap);
                 let num_locals = callee_locals.len();
                 let stack_base = state.stack.len();
-                let captured: Vec<(u32, Value)> = heap
+                let captured: Vec<DynamicCapture> = heap
                     .dynamic_captures
                     .get(*heap_idx)
                     .cloned()
                     .unwrap_or_default();
                 state.stack.extend(callee_locals);
-                for (slot, value) in captured {
-                    state.set_local_at(stack_base, num_locals, slot as usize, value);
+                for capture in captured {
+                    state.set_local_at(
+                        stack_base,
+                        num_locals,
+                        capture.inner_slot as usize,
+                        capture.value,
+                    );
                 }
-                state.chunks_stack.push(callee_chunk);
+                state.chunks_stack.push(Rc::new(callee_chunk));
+                let frame_id = state.allocate_frame_id();
                 state.frames.push(Frame {
+                    id: frame_id,
                     chunk_index: state.chunks_stack.len() - 1,
                     is_dynamic: true,
                     pc: 0,
@@ -2150,6 +2289,7 @@ fn handle_apply_invoke(
                     this_value: this_arg,
                     rethrow_after_finally: false,
                     new_object,
+                    dynamic_function_id: Some(*heap_idx),
                     generator_id: None,
                     is_async: chunk_is_async,
                 });
@@ -2186,7 +2326,9 @@ fn handle_apply_invoke(
                 let callee_locals = setup_callee_locals(callee_chunk, &args, heap);
                 let stack_base = state.stack.len();
                 state.stack.extend(callee_locals);
+                let frame_id = state.allocate_frame_id();
                 state.frames.push(Frame {
+                    id: frame_id,
                     chunk_index: *func_idx,
                     is_dynamic: false,
                     pc: 0,
@@ -2195,6 +2337,7 @@ fn handle_apply_invoke(
                     this_value: this_arg,
                     rethrow_after_finally: false,
                     new_object,
+                    dynamic_function_id: None,
                     generator_id: None,
                     is_async: chunk_is_async,
                 });
@@ -2223,7 +2366,7 @@ fn handle_apply_invoke(
                     Ok(BuiltinResult::Throw(v)) => {
                         let thrown = normalize_builtin_throw_value(heap, v);
                         if let Some(completion) =
-                            propagate_call_throw(program, state, &chunk, call_pc, thrown)?
+                            propagate_call_throw(program, state, current_chunk, call_pc, thrown)?
                         {
                             return Ok(Some(completion));
                         }
@@ -2262,9 +2405,13 @@ fn handle_apply_invoke(
                         }
                         Ok(BuiltinResult::Throw(v)) => {
                             let thrown = normalize_builtin_throw_value(heap, v);
-                            if let Some(completion) =
-                                propagate_call_throw(program, state, &chunk, call_pc, thrown)?
-                            {
+                            if let Some(completion) = propagate_call_throw(
+                                program,
+                                state,
+                                current_chunk,
+                                call_pc,
+                                thrown,
+                            )? {
                                 return Ok(Some(completion));
                             }
                             return Ok(None);
@@ -2296,7 +2443,7 @@ fn handle_apply_invoke(
                         "callee is not a function (got object)".to_string(),
                     );
                     if let Some(completion) =
-                        propagate_call_throw(program, state, &chunk, call_pc, thrown)?
+                        propagate_call_throw(program, state, current_chunk, call_pc, thrown)?
                     {
                         return Ok(Some(completion));
                     }
@@ -2307,13 +2454,10 @@ fn handle_apply_invoke(
                 let thrown = create_native_error(
                     heap,
                     "TypeError",
-                    format!(
-                        "callee is not a function (got {})",
-                        callee.type_name_for_error(),
-                    ),
+                    format!("callee is not a function (got {})", callee.type_name_for_error(),),
                 );
                 if let Some(completion) =
-                    propagate_call_throw(program, state, &chunk, call_pc, thrown)?
+                    propagate_call_throw(program, state, current_chunk, call_pc, thrown)?
                 {
                     return Ok(Some(completion));
                 }
@@ -2353,14 +2497,14 @@ fn create_generator_state(
     this_value: Value,
 ) -> usize {
     let mut locals = super::calls::setup_callee_locals(chunk, args, heap);
-    let captured: Vec<(u32, Value)> = heap
+    let captured: Vec<DynamicCapture> = heap
         .dynamic_captures
         .get(dyn_index)
         .cloned()
         .unwrap_or_default();
-    for (slot, value) in captured {
-        if (slot as usize) < locals.len() {
-            locals[slot as usize] = value;
+    for capture in captured {
+        if (capture.inner_slot as usize) < locals.len() {
+            locals[capture.inner_slot as usize] = capture.value;
         }
     }
     let gs = crate::runtime::GeneratorState {
@@ -2403,8 +2547,10 @@ fn resume_generator(
             }
             let num_locals = gs.locals.len();
             if gs.is_dynamic {
-                state.chunks_stack.push(gs.chunk.clone());
+                state.chunks_stack.push(Rc::new(gs.chunk.clone()));
+                let frame_id = state.allocate_frame_id();
                 state.frames.push(Frame {
+                    id: frame_id,
                     chunk_index: state.chunks_stack.len() - 1,
                     is_dynamic: true,
                     pc: gs.pc,
@@ -2413,11 +2559,14 @@ fn resume_generator(
                     this_value: gs.this_value.clone(),
                     rethrow_after_finally: false,
                     new_object: None,
+                    dynamic_function_id: None,
                     generator_id: Some(gen_id),
                     is_async: false,
                 });
             } else {
+                let frame_id = state.allocate_frame_id();
                 state.frames.push(Frame {
+                    id: frame_id,
                     chunk_index: gs.dyn_index,
                     is_dynamic: false,
                     pc: gs.pc,
@@ -2426,6 +2575,7 @@ fn resume_generator(
                     this_value: gs.this_value.clone(),
                     rethrow_after_finally: false,
                     new_object: None,
+                    dynamic_function_id: None,
                     generator_id: Some(gen_id),
                     is_async: false,
                 });

@@ -42,6 +42,15 @@ fn b(category: &str, name: &str) -> u8 {
 
 const MAX_ARRAY_LENGTH: usize = 10_000_000;
 
+#[derive(Debug, Clone)]
+pub struct DynamicCapture {
+    pub name: String,
+    pub inner_slot: u32,
+    pub outer_slot: Option<u32>,
+    pub outer_frame_id: Option<usize>,
+    pub value: Value,
+}
+
 #[derive(Debug)]
 struct HeapObject {
     props: HashMap<String, Value>,
@@ -61,6 +70,9 @@ pub struct Heap {
     error_object_ids: HashSet<usize>,
     global_object_id: usize,
     array_prototype_id: Option<usize>,
+    array_buffer_prototype_id: Option<usize>,
+    typed_array_constructor_id: Option<usize>,
+    typed_array_prototype_id: Option<usize>,
     regexp_prototype_id: Option<usize>,
     function_props: HashMap<usize, HashMap<String, Value>>,
     deleted_builtin_props: HashSet<(u8, String)>,
@@ -69,7 +81,7 @@ pub struct Heap {
     /// Lives on the heap so DynamicFunction values remain valid across interpreter invocations.
     pub dynamic_chunks: Vec<BytecodeChunk>,
     /// Captured slot values for each dynamic function.
-    pub dynamic_captures: Vec<Vec<(u32, Value)>>,
+    pub dynamic_captures: Vec<Vec<DynamicCapture>>,
     /// Named properties for dynamic functions (e.g. `prototype`). Indexed by dynamic function id.
     dynamic_function_props: Vec<HashMap<String, Value>>,
     /// Suspended generator states. Indexed by the usize in Value::Generator.
@@ -92,6 +104,9 @@ impl Default for Heap {
             error_object_ids: HashSet::new(),
             global_object_id: 0,
             array_prototype_id: None,
+            array_buffer_prototype_id: None,
+            typed_array_constructor_id: None,
+            typed_array_prototype_id: None,
             regexp_prototype_id: None,
             function_props: HashMap::new(),
             deleted_builtin_props: HashSet::new(),
@@ -321,6 +336,27 @@ impl Heap {
         self.set_prop(arr_proto_id, "with", Value::Builtin(b("Array", "with")));
         self.array_prototype_id = Some(arr_proto_id);
 
+        let typed_array_proto_id = self.alloc_object();
+        self.set_prop(
+            typed_array_proto_id,
+            "filter",
+            Value::Builtin(b("Array", "filter")),
+        );
+        let typed_array_ctor_id = self.alloc_object();
+        self.set_prop(
+            typed_array_ctor_id,
+            "prototype",
+            Value::Object(typed_array_proto_id),
+        );
+        self.set_prop(
+            typed_array_proto_id,
+            "constructor",
+            Value::Object(typed_array_ctor_id),
+        );
+        self.typed_array_constructor_id = Some(typed_array_ctor_id);
+        self.typed_array_prototype_id = Some(typed_array_proto_id);
+        self.set_prop(global_id, "TypedArray", Value::Object(typed_array_ctor_id));
+
         let arr_id = self.alloc_object();
         self.set_prop(arr_id, "prototype", Value::Object(arr_proto_id));
         self.set_prop(arr_id, "isArray", Value::Builtin(b("Array", "isArray")));
@@ -498,6 +534,7 @@ impl Heap {
         );
         let str_id = self.alloc_object();
         self.set_prop(str_id, "prototype", Value::Object(str_proto_id));
+        self.set_prop(str_id, "__call__", Value::Builtin(b("Type", "String")));
         self.set_prop(
             str_id,
             "fromCharCode",
@@ -966,6 +1003,13 @@ impl Heap {
         self.set_prop(global_id, "Float16Array", Value::Builtin(int32array));
         self.set_prop(global_id, "BigInt64Array", Value::Builtin(int32array));
         self.set_prop(global_id, "BigUint64Array", Value::Builtin(int32array));
+        let array_buffer_proto_id = self.alloc_object();
+        self.set_prop(
+            array_buffer_proto_id,
+            "resize",
+            Value::Builtin(b("TypedArray", "ArrayBufferResize")),
+        );
+        self.array_buffer_prototype_id = Some(array_buffer_proto_id);
         self.set_prop(
             global_id,
             "ArrayBuffer",
@@ -1101,6 +1145,24 @@ impl Heap {
         self.is_html_dda_object_id == Some(obj_id)
     }
 
+    pub fn typed_array_constructor_value(&self) -> Value {
+        self.typed_array_constructor_id
+            .map(Value::Object)
+            .unwrap_or(Value::Undefined)
+    }
+
+    pub fn array_buffer_prototype_value(&self) -> Value {
+        self.array_buffer_prototype_id
+            .map(Value::Object)
+            .unwrap_or(Value::Undefined)
+    }
+
+    pub fn typed_array_prototype_value(&self) -> Value {
+        self.typed_array_prototype_id
+            .map(Value::Object)
+            .unwrap_or(Value::Undefined)
+    }
+
     pub fn get_global(&self, name: &str) -> Value {
         self.get_prop(self.global_object_id, name)
     }
@@ -1120,6 +1182,16 @@ impl Heap {
         props.insert(key.to_string(), value);
     }
 
+    pub fn ensure_function_prototype(&mut self, func_index: usize) -> usize {
+        if let Value::Object(proto_id) = self.get_function_prop(func_index, "prototype") {
+            return proto_id;
+        }
+        let proto_id = self.alloc_object();
+        self.set_prop(proto_id, "constructor", Value::Function(func_index));
+        self.set_function_prop(func_index, "prototype", Value::Object(proto_id));
+        proto_id
+    }
+
     pub fn get_dynamic_function_prop(&self, dyn_idx: usize, key: &str) -> Value {
         self.dynamic_function_props
             .get(dyn_idx)
@@ -1133,6 +1205,16 @@ impl Heap {
                 .resize_with(dyn_idx + 1, HashMap::new);
         }
         self.dynamic_function_props[dyn_idx].insert(key.to_string(), value);
+    }
+
+    pub fn ensure_dynamic_function_prototype(&mut self, dyn_idx: usize) -> usize {
+        if let Value::Object(proto_id) = self.get_dynamic_function_prop(dyn_idx, "prototype") {
+            return proto_id;
+        }
+        let proto_id = self.alloc_object();
+        self.set_prop(proto_id, "constructor", Value::DynamicFunction(dyn_idx));
+        self.set_dynamic_function_prop(dyn_idx, "prototype", Value::Object(proto_id));
+        proto_id
     }
 
     pub fn alloc_generator(&mut self, state: GeneratorState) -> usize {

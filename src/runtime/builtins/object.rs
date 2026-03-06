@@ -232,6 +232,14 @@ pub fn get_prototype_of(args: &[Value], heap: &mut Heap) -> Value {
             Some(proto_id) => Value::Object(proto_id),
             None => Value::Null,
         },
+        Some(Value::Builtin(id)) if is_typed_array_constructor(*id) => {
+            let typed_array_ctor = heap.typed_array_constructor_value();
+            if typed_array_ctor == Value::Undefined {
+                Value::Null
+            } else {
+                typed_array_ctor
+            }
+        }
         _ => Value::Null,
     }
 }
@@ -300,11 +308,21 @@ pub fn has_own(args: &[Value], heap: &mut Heap) -> Value {
             heap.function_has_own_property(*function_index, &key)
         }
         Some(Value::Builtin(id)) => {
-            (key == "length" || key == "name") && !heap.builtin_prop_deleted(*id, &key)
+            ((key == "length" || key == "name") && !heap.builtin_prop_deleted(*id, &key))
+                || (is_typed_array_constructor(*id)
+                    && (key == "prototype" || key == "BYTES_PER_ELEMENT"))
         }
         _ => false,
     };
     Value::Bool(result)
+}
+
+fn is_typed_array_constructor(id: u8) -> bool {
+    if crate::runtime::builtins::category(id) != "TypedArray" {
+        return false;
+    }
+    let name = crate::runtime::builtins::name(id);
+    name != "ArrayBuffer" && name != "DataView"
 }
 
 pub fn is_same_value(args: &[Value], _heap: &mut Heap) -> Value {
@@ -497,6 +515,10 @@ pub fn get_own_property_names(args: &[Value], heap: &mut Heap) -> Value {
             }
             if !heap.builtin_prop_deleted(*id, "name") {
                 keys.push("name".to_string());
+            }
+            if is_typed_array_constructor(*id) {
+                keys.push("prototype".to_string());
+                keys.push("BYTES_PER_ELEMENT".to_string());
             }
             keys
         }

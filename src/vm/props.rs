@@ -207,11 +207,22 @@ fn builtin_prop(id: u8, key: &str, heap: &Heap) -> Value {
     match key {
         "length" => Value::Int(builtins::length(id)),
         "name" => Value::String(builtins::name(id).to_string()),
+        "prototype" if builtins::name(id) == "ArrayBuffer" => heap.array_buffer_prototype_value(),
+        "prototype" if is_typed_array_constructor(id) => heap.typed_array_prototype_value(),
+        "BYTES_PER_ELEMENT" if is_typed_array_constructor(id) => Value::Int(8),
         "call" => Value::Builtin(b("Function", "call")),
         "bind" => Value::Builtin(b("Function", "bind")),
         "apply" => Value::Builtin(b("Function", "apply")),
         _ => Value::Undefined,
     }
+}
+
+fn is_typed_array_constructor(id: u8) -> bool {
+    if builtins::category(id) != "TypedArray" {
+        return false;
+    }
+    let name = builtins::name(id);
+    name != "ArrayBuffer" && name != "DataView"
 }
 
 pub(crate) fn primitive_string_method(key: &str) -> Value {

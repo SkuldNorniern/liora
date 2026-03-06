@@ -1247,6 +1247,11 @@ const BUILTINS: &[BuiltinDef] = &[
         entry: BuiltinEntry::Normal(typed_array::array_buffer),
     },
     BuiltinDef {
+        category: "TypedArray",
+        name: "ArrayBufferResize",
+        entry: BuiltinEntry::Throwing(typed_array::array_buffer_resize),
+    },
+    BuiltinDef {
         category: "Global",
         name: "Function",
         entry: BuiltinEntry::Throwing(function_ctor::function_constructor),

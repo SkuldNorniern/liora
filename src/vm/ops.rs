@@ -1,5 +1,6 @@
 use crate::runtime::builtins;
 use crate::runtime::{Heap, Value};
+use std::cmp::Ordering;
 
 #[inline(always)]
 pub(crate) fn is_truthy(v: &Value) -> bool {
@@ -86,6 +87,7 @@ pub(crate) fn strict_eq(a: &Value, b: &Value) -> bool {
         (Value::Int(x), Value::Number(y)) => !y.is_nan() && (*x as f64) == *y,
         (Value::Number(x), Value::Int(y)) => !x.is_nan() && *x == (*y as f64),
         (Value::Number(x), Value::Number(y)) => !x.is_nan() && !y.is_nan() && x == y,
+        (Value::BigInt(x), Value::BigInt(y)) => normalize_bigint_decimal(x) == normalize_bigint_decimal(y),
         (Value::String(x), Value::String(y)) => x == y,
         (Value::Symbol(x), Value::Symbol(y)) => x == y,
         (Value::Object(x), Value::Object(y)) => x == y,
@@ -96,6 +98,46 @@ pub(crate) fn strict_eq(a: &Value, b: &Value) -> bool {
         (Value::Function(x), Value::Function(y)) => x == y,
         (Value::Builtin(x), Value::Builtin(y)) => x == y,
         _ => false,
+    }
+}
+
+fn normalize_bigint_decimal(input: &str) -> (bool, String) {
+    let mut digits = input;
+    let mut negative = false;
+    if let Some(rest) = digits.strip_prefix('-') {
+        negative = true;
+        digits = rest;
+    } else if let Some(rest) = digits.strip_prefix('+') {
+        digits = rest;
+    }
+    let digits = digits.trim_start_matches('0');
+    if digits.is_empty() {
+        return (false, "0".to_string());
+    }
+    (negative, digits.to_string())
+}
+
+fn compare_bigint_decimal(left: &str, right: &str) -> Ordering {
+    let (left_negative, left_digits) = normalize_bigint_decimal(left);
+    let (right_negative, right_digits) = normalize_bigint_decimal(right);
+
+    if left_negative != right_negative {
+        return if left_negative {
+            Ordering::Less
+        } else {
+            Ordering::Greater
+        };
+    }
+
+    let magnitude_order = left_digits
+        .len()
+        .cmp(&right_digits.len())
+        .then_with(|| left_digits.cmp(&right_digits));
+
+    if left_negative {
+        magnitude_order.reverse()
+    } else {
+        magnitude_order
     }
 }
 
@@ -229,6 +271,7 @@ pub(crate) fn lt_values(a: &Value, b: &Value) -> Value {
         (Value::Number(x), Value::Number(y)) => x < y,
         (Value::Int(x), Value::Number(y)) => (*x as f64) < *y,
         (Value::Number(x), Value::Int(y)) => *x < (*y as f64),
+        (Value::BigInt(x), Value::BigInt(y)) => compare_bigint_decimal(x, y).is_lt(),
         (Value::String(x), Value::String(y)) => x < y,
         _ => builtins::to_number(a) < builtins::to_number(b),
     };
@@ -242,6 +285,7 @@ pub(crate) fn lte_values(a: &Value, b: &Value) -> Value {
         (Value::Number(x), Value::Number(y)) => x <= y,
         (Value::Int(x), Value::Number(y)) => (*x as f64) <= *y,
         (Value::Number(x), Value::Int(y)) => *x <= (*y as f64),
+        (Value::BigInt(x), Value::BigInt(y)) => !compare_bigint_decimal(x, y).is_gt(),
         (Value::String(x), Value::String(y)) => x <= y,
         _ => builtins::to_number(a) <= builtins::to_number(b),
     };
@@ -255,6 +299,7 @@ pub(crate) fn gt_values(a: &Value, b: &Value) -> Value {
         (Value::Number(x), Value::Number(y)) => x > y,
         (Value::Int(x), Value::Number(y)) => (*x as f64) > *y,
         (Value::Number(x), Value::Int(y)) => *x > (*y as f64),
+        (Value::BigInt(x), Value::BigInt(y)) => compare_bigint_decimal(x, y).is_gt(),
         (Value::String(x), Value::String(y)) => x > y,
         _ => builtins::to_number(a) > builtins::to_number(b),
     };
@@ -268,6 +313,7 @@ pub(crate) fn gte_values(a: &Value, b: &Value) -> Value {
         (Value::Number(x), Value::Number(y)) => x >= y,
         (Value::Int(x), Value::Number(y)) => (*x as f64) >= *y,
         (Value::Number(x), Value::Int(y)) => *x >= (*y as f64),
+        (Value::BigInt(x), Value::BigInt(y)) => !compare_bigint_decimal(x, y).is_lt(),
         (Value::String(x), Value::String(y)) => x >= y,
         _ => builtins::to_number(a) >= builtins::to_number(b),
     };

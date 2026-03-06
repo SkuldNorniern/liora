@@ -1,8 +1,8 @@
 //! test262 $262 host object stubs. Minimal implementation for harness-dependent tests.
 
 use super::BuiltinContext;
-use crate::runtime::Value;
 use crate::runtime::builtins;
+use crate::runtime::Value;
 
 pub fn create_realm(
     _args: &[Value],
@@ -30,9 +30,15 @@ pub fn detach_array_buffer(
     ctx: &mut BuiltinContext,
 ) -> Result<Value, super::BuiltinError> {
     let heap = &mut ctx.heap;
-    let buffer = args.first().and_then(|v| v.as_object_id());
+    let buffer_arg = if args.len() >= 2 {
+        args.get(1)
+    } else {
+        args.first()
+    };
+    let buffer = buffer_arg.and_then(|v| v.as_object_id());
     if let Some(id) = buffer {
         heap.set_prop(id, "byteLength", Value::Int(0));
+        heap.set_prop(id, "__detached__", Value::Bool(true));
     }
     Ok(Value::Undefined)
 }
