@@ -439,11 +439,19 @@ pub fn run_test(test_path: &Path, test262_root: Option<&Path>) -> TestResult {
     let body = extract_test_body(&source);
     let use_harness = test262_root.is_some() && !has_raw_flag(meta.as_ref());
 
-    let (prelude, _) = if use_harness {
+    let (prelude, includes_ok) = if use_harness {
         build_prelude(test262_root, meta.as_ref())
     } else {
         (load_harness(None), true)
     };
+
+    if use_harness && !includes_ok {
+        return TestResult {
+            path: test_path.to_string_lossy().to_string(),
+            status: TestStatus::HarnessError,
+            message: Some("missing required harness include".to_string()),
+        };
+    }
 
     let wrapped = wrap_test(body, &prelude, is_async);
     let outcome = run_one(
@@ -453,11 +461,18 @@ pub fn run_test(test_path: &Path, test262_root: Option<&Path>) -> TestResult {
     );
 
     if matches!(outcome, RunOutcome::Pass) && needs_strict_rerun(meta.as_ref()) {
-        let (base_prelude, _) = if use_harness {
+        let (base_prelude, strict_includes_ok) = if use_harness {
             build_prelude(test262_root, meta.as_ref())
         } else {
             (String::new(), true)
         };
+        if use_harness && !strict_includes_ok {
+            return TestResult {
+                path: test_path.to_string_lossy().to_string(),
+                status: TestStatus::HarnessError,
+                message: Some("missing required harness include".to_string()),
+            };
+        }
         let strict_prelude = format!("\"use strict\";\n{}", base_prelude);
         let strict_wrapped = wrap_test(body, &strict_prelude, is_async);
         let strict_outcome = run_one(

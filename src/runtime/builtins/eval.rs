@@ -1,9 +1,9 @@
 //! eval(x) - Execute code string in global scope. Minimal implementation for test262.
 use super::BuiltinContext;
-use crate::frontend::{Parser, check_early_errors};
+use crate::frontend::{check_early_errors, Parser};
 use crate::ir::{hir_to_bytecode, script_to_hir};
 use crate::runtime::Value;
-use crate::vm::{Completion, Program, interpret_program_with_heap};
+use crate::vm::{interpret_program_with_heap, Completion, Program};
 
 pub fn eval(args: &[Value], ctx: &mut BuiltinContext) -> Result<Value, super::BuiltinError> {
     let code = match args.first() {
@@ -43,11 +43,25 @@ pub fn eval(args: &[Value], ctx: &mut BuiltinContext) -> Result<Value, super::Bu
         .map(hir_to_bytecode)
         .map(|cf| cf.chunk)
         .collect();
+    let init_entry = funcs
+        .iter()
+        .position(|function| function.name.as_deref() == Some("__init__"));
+    let global_funcs: Vec<(String, usize)> = funcs
+        .iter()
+        .enumerate()
+        .filter_map(|(index, function)| {
+            function
+                .name
+                .as_ref()
+                .filter(|name| *name != "__init__")
+                .map(|name| (name.clone(), index))
+        })
+        .collect();
     let program = Program {
         chunks,
         entry,
-        init_entry: None,
-        global_funcs: Vec::new(),
+        init_entry,
+        global_funcs,
     };
     match interpret_program_with_heap(&program, ctx.heap, false, None, false, false, None) {
         Ok(Completion::Return(v)) => Ok(v),

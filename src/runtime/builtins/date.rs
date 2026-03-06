@@ -193,24 +193,46 @@ pub fn set_year(args: &[Value], heap: &mut Heap) -> Value {
         Some(i) => i,
         None => return Value::Number(f64::NAN),
     };
-    let year = args.get(1).map(super::to_number).unwrap_or(f64::NAN);
-    let ms = heap.date_timestamp(id);
-    if !ms.is_finite() || year.is_nan() || year.is_infinite() {
+
+    let date_value = heap.date_timestamp(id);
+    let year_number = args.get(1).map(super::to_number).unwrap_or(f64::NAN);
+
+    if year_number.is_nan() {
+        heap.set_date_timestamp(id, f64::NAN);
         return Value::Number(f64::NAN);
     }
-    let yr = year as i32;
-    let yr = if (0..=99).contains(&yr) {
-        yr + 1900
+    if !year_number.is_finite() {
+        heap.set_date_timestamp(id, f64::NAN);
+        return Value::Number(f64::NAN);
+    }
+
+    let local_time = if date_value.is_nan() { 0.0 } else { date_value };
+    let time_within_day = local_time.rem_euclid(86_400_000.0);
+    let day_number = ((local_time - time_within_day) / 86_400_000.0) as i64;
+    let (_, month, day) = days_to_ymd(day_number);
+
+    let mut full_year = year_number.trunc() as i64;
+    if (0..=99).contains(&full_year) {
+        full_year += 1900;
+    }
+    if full_year < i32::MIN as i64 || full_year > i32::MAX as i64 {
+        heap.set_date_timestamp(id, f64::NAN);
+        return Value::Number(f64::NAN);
+    }
+
+    let new_day_number = ymd_to_days(full_year as i32, month, day);
+    let new_time = new_day_number as f64 * 86_400_000.0 + time_within_day;
+    let clipped = time_clip(new_time);
+    heap.set_date_timestamp(id, clipped);
+    Value::Number(clipped)
+}
+
+fn time_clip(time: f64) -> f64 {
+    if !time.is_finite() || time.abs() > 8.64e15 {
+        f64::NAN
     } else {
-        yr
-    };
-    let secs = (ms / 1000.0) as i64;
-    let days = secs / 86400;
-    let (_, mo, d) = days_to_ymd(days);
-    let new_days = ymd_to_days(yr, mo, d);
-    let new_ms = (new_days * 86400) as f64 * 1000.0;
-    heap.set_date_timestamp(id, new_ms);
-    Value::Number(heap.date_timestamp(id))
+        time.trunc()
+    }
 }
 
 fn ymd_to_days(y: i32, mo: i32, d: i32) -> i64 {

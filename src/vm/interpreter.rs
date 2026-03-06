@@ -155,6 +155,55 @@ fn trace_op(pc: usize, op: u8) {
     eprintln!("  {:04}  {}", pc, opname);
 }
 
+fn create_native_error(heap: &mut Heap, constructor_name: &str, message: String) -> Value {
+    let object_id = heap.alloc_object();
+    heap.record_error_object(object_id);
+    heap.set_prop(
+        object_id,
+        "name",
+        Value::String(constructor_name.to_string()),
+    );
+    heap.set_prop(object_id, "message", Value::String(message));
+    let constructor = heap.get_global(constructor_name);
+    heap.set_prop(object_id, "constructor", constructor);
+    Value::Object(object_id)
+}
+
+fn split_native_error_string(text: &str) -> Option<(&'static str, String)> {
+    const ERROR_NAMES: [&str; 6] = [
+        "TypeError",
+        "ReferenceError",
+        "RangeError",
+        "SyntaxError",
+        "URIError",
+        "EvalError",
+    ];
+    for name in ERROR_NAMES {
+        if text == name {
+            return Some((name, String::new()));
+        }
+        if let Some(rest) = text.strip_prefix(name)
+            && let Some(rest) = rest.strip_prefix(':')
+        {
+            return Some((name, rest.trim_start().to_string()));
+        }
+    }
+    None
+}
+
+fn normalize_builtin_throw_value(heap: &mut Heap, thrown: Value) -> Value {
+    match thrown {
+        Value::String(text) => {
+            if let Some((error_name, message)) = split_native_error_string(&text) {
+                create_native_error(heap, error_name, message)
+            } else {
+                Value::String(text)
+            }
+        }
+        other => other,
+    }
+}
+
 fn interpret_program_with_trace_and_limit(
     program: &Program,
     trace: bool,
@@ -721,7 +770,10 @@ pub fn interpret_program_with_heap_and_entry(
                 let key = state.stack.pop().ok_or_else(underflow)?;
                 match in_check(&key, &obj, heap) {
                     Ok(result) => state.stack.push(Value::Bool(result)),
-                    Err(msg) => return Ok(Completion::Throw(Value::String(msg))),
+                    Err(msg) => {
+                        let thrown = normalize_builtin_throw_value(heap, Value::String(msg));
+                        return Ok(Completion::Throw(thrown));
+                    }
                 }
             }
             0x29 => {
@@ -995,8 +1047,9 @@ pub fn interpret_program_with_heap_and_entry(
                         state.stack.push(v);
                     }
                     Ok(BuiltinResult::Throw(v)) => {
+                        let thrown = normalize_builtin_throw_value(heap, v);
                         if let Some(completion) =
-                            propagate_call_throw(program, &mut state, &chunk, call_pc, v)?
+                            propagate_call_throw(program, &mut state, &chunk, call_pc, thrown)?
                         {
                             return Ok(completion);
                         }
@@ -1069,8 +1122,15 @@ pub fn interpret_program_with_heap_and_entry(
                                 state.stack.push(v);
                             }
                             Ok(BuiltinResult::Throw(v)) => {
+                                let thrown = normalize_builtin_throw_value(heap, v);
                                 if let Some(completion) =
-                                    propagate_call_throw(program, &mut state, &chunk, call_pc, v)?
+                                    propagate_call_throw(
+                                        program,
+                                        &mut state,
+                                        &chunk,
+                                        call_pc,
+                                        thrown,
+                                    )?
                                 {
                                     return Ok(completion);
                                 }
@@ -1217,8 +1277,15 @@ pub fn interpret_program_with_heap_and_entry(
                                 state.stack.push(v);
                             }
                             Ok(BuiltinResult::Throw(v)) => {
+                                let thrown = normalize_builtin_throw_value(heap, v);
                                 if let Some(completion) =
-                                    propagate_call_throw(program, &mut state, &chunk, call_pc, v)?
+                                    propagate_call_throw(
+                                        program,
+                                        &mut state,
+                                        &chunk,
+                                        call_pc,
+                                        thrown,
+                                    )?
                                 {
                                     return Ok(completion);
                                 }
@@ -1269,8 +1336,9 @@ pub fn interpret_program_with_heap_and_entry(
                                     state.stack.push(v);
                                 }
                                 Ok(BuiltinResult::Throw(v)) => {
+                                    let thrown = normalize_builtin_throw_value(heap, v);
                                     if let Some(completion) = propagate_call_throw(
-                                        program, &mut state, &chunk, call_pc, v,
+                                        program, &mut state, &chunk, call_pc, thrown,
                                     )? {
                                         return Ok(completion);
                                     }
@@ -1309,14 +1377,17 @@ pub fn interpret_program_with_heap_and_entry(
                         } else if heap.is_html_dda_object(obj_id) {
                             state.stack.push(Value::Null);
                         } else {
-                            let msg =
-                                "TypeError: callee is not a function (got object)".to_string();
+                            let thrown = create_native_error(
+                                heap,
+                                "TypeError",
+                                "callee is not a function (got object)".to_string(),
+                            );
                             if let Some(completion) = propagate_call_throw(
                                 program,
                                 &mut state,
                                 &chunk,
                                 call_pc,
-                                Value::String(msg),
+                                thrown,
                             )? {
                                 return Ok(completion);
                             }
@@ -1324,16 +1395,20 @@ pub fn interpret_program_with_heap_and_entry(
                         }
                     }
                     _ => {
-                        let msg = format!(
-                            "TypeError: callee is not a function (got {})",
-                            callee.type_name_for_error(),
+                        let thrown = create_native_error(
+                            heap,
+                            "TypeError",
+                            format!(
+                                "callee is not a function (got {})",
+                                callee.type_name_for_error(),
+                            ),
                         );
                         if let Some(completion) = propagate_call_throw(
                             program,
                             &mut state,
                             &chunk,
                             call_pc,
-                            Value::String(msg),
+                            thrown,
                         )? {
                             return Ok(completion);
                         }
@@ -1414,8 +1489,15 @@ pub fn interpret_program_with_heap_and_entry(
                                 state.stack.push(v);
                             }
                             Ok(BuiltinResult::Throw(v)) => {
+                                let thrown = normalize_builtin_throw_value(heap, v);
                                 if let Some(completion) =
-                                    propagate_call_throw(program, &mut state, &chunk, trace_pc, v)?
+                                    propagate_call_throw(
+                                        program,
+                                        &mut state,
+                                        &chunk,
+                                        trace_pc,
+                                        thrown,
+                                    )?
                                 {
                                     return Ok(completion);
                                 }
@@ -1550,8 +1632,9 @@ pub fn interpret_program_with_heap_and_entry(
                                     state.stack.push(constructed);
                                 }
                                 Ok(BuiltinResult::Throw(v)) => {
+                                    let thrown = normalize_builtin_throw_value(heap, v);
                                     if let Some(completion) = propagate_call_throw(
-                                        program, &mut state, &chunk, trace_pc, v,
+                                        program, &mut state, &chunk, trace_pc, thrown,
                                     )? {
                                         return Ok(completion);
                                     }
@@ -1590,14 +1673,17 @@ pub fn interpret_program_with_heap_and_entry(
                         } else if heap.is_html_dda_object(obj_id_callee) {
                             state.stack.push(Value::Null);
                         } else {
-                            let msg =
-                                "TypeError: callee is not a function (got object)".to_string();
+                            let thrown = create_native_error(
+                                heap,
+                                "TypeError",
+                                "callee is not a function (got object)".to_string(),
+                            );
                             if let Some(completion) = propagate_call_throw(
                                 program,
                                 &mut state,
                                 &chunk,
                                 trace_pc,
-                                Value::String(msg),
+                                thrown,
                             )? {
                                 return Ok(completion);
                             }
@@ -1605,16 +1691,20 @@ pub fn interpret_program_with_heap_and_entry(
                         }
                     }
                     _ => {
-                        let msg = format!(
-                            "TypeError: callee is not a function (got {})",
-                            callee.type_name_for_error(),
+                        let thrown = create_native_error(
+                            heap,
+                            "TypeError",
+                            format!(
+                                "callee is not a function (got {})",
+                                callee.type_name_for_error(),
+                            ),
                         );
                         if let Some(completion) = propagate_call_throw(
                             program,
                             &mut state,
                             &chunk,
                             trace_pc,
-                            Value::String(msg),
+                            thrown,
                         )? {
                             return Ok(completion);
                         }
@@ -1993,8 +2083,9 @@ fn handle_apply_invoke(
                         return Ok(None);
                     }
                     Ok(BuiltinResult::Throw(v)) => {
+                        let thrown = normalize_builtin_throw_value(heap, v);
                         if let Some(completion) =
-                            propagate_call_throw(program, state, &chunk, call_pc, v)?
+                            propagate_call_throw(program, state, &chunk, call_pc, thrown)?
                         {
                             return Ok(Some(completion));
                         }
@@ -2130,8 +2221,9 @@ fn handle_apply_invoke(
                         return Ok(None);
                     }
                     Ok(BuiltinResult::Throw(v)) => {
+                        let thrown = normalize_builtin_throw_value(heap, v);
                         if let Some(completion) =
-                            propagate_call_throw(program, state, &chunk, call_pc, v)?
+                            propagate_call_throw(program, state, &chunk, call_pc, thrown)?
                         {
                             return Ok(Some(completion));
                         }
@@ -2169,8 +2261,9 @@ fn handle_apply_invoke(
                             return Ok(None);
                         }
                         Ok(BuiltinResult::Throw(v)) => {
+                            let thrown = normalize_builtin_throw_value(heap, v);
                             if let Some(completion) =
-                                propagate_call_throw(program, state, &chunk, call_pc, v)?
+                                propagate_call_throw(program, state, &chunk, call_pc, thrown)?
                             {
                                 return Ok(Some(completion));
                             }
@@ -2197,9 +2290,13 @@ fn handle_apply_invoke(
                     state.stack.push(Value::Null);
                     return Ok(None);
                 } else {
-                    let msg = "TypeError: callee is not a function (got object)".to_string();
+                    let thrown = create_native_error(
+                        heap,
+                        "TypeError",
+                        "callee is not a function (got object)".to_string(),
+                    );
                     if let Some(completion) =
-                        propagate_call_throw(program, state, &chunk, call_pc, Value::String(msg))?
+                        propagate_call_throw(program, state, &chunk, call_pc, thrown)?
                     {
                         return Ok(Some(completion));
                     }
@@ -2207,12 +2304,16 @@ fn handle_apply_invoke(
                 }
             }
             _ => {
-                let msg = format!(
-                    "TypeError: callee is not a function (got {})",
-                    callee.type_name_for_error(),
+                let thrown = create_native_error(
+                    heap,
+                    "TypeError",
+                    format!(
+                        "callee is not a function (got {})",
+                        callee.type_name_for_error(),
+                    ),
                 );
                 if let Some(completion) =
-                    propagate_call_throw(program, state, &chunk, call_pc, Value::String(msg))?
+                    propagate_call_throw(program, state, &chunk, call_pc, thrown)?
                 {
                     return Ok(Some(completion));
                 }
