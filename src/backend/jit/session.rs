@@ -124,6 +124,49 @@ impl JitSession {
         }
     }
 
+    pub fn try_invoke_compiled_for_dynamic_call(
+        &mut self,
+        cache_key: usize,
+        args: &[Value],
+    ) -> Option<i64> {
+        match self.cache.get(cache_key)? {
+            CacheEntry::NativeCompiled(compiled) => {
+                if args.is_empty() {
+                    Some(compiled.invoke())
+                } else {
+                    None
+                }
+            }
+            CacheEntry::NativeCompiledUnary(compiled) => {
+                if args.len() == 1 {
+                    let eval_args = values_to_i64_args(args)?;
+                    Some(compiled.invoke(eval_args[0]))
+                } else {
+                    None
+                }
+            }
+            CacheEntry::NativeCompiledBinary(compiled) => {
+                if args.len() == 2 {
+                    let eval_args = values_to_i64_args(args)?;
+                    Some(compiled.invoke(eval_args[0], eval_args[1]))
+                } else {
+                    None
+                }
+            }
+            CacheEntry::NativeBranchLoop(limit) => {
+                if args.is_empty() {
+                    Some(branch_loop_native(*limit))
+                } else {
+                    None
+                }
+            }
+            CacheEntry::NativeIntLoop
+            | CacheEntry::EvalCompiled
+            | CacheEntry::Unknown
+            | CacheEntry::Rejected => None,
+        }
+    }
+
     pub fn try_compile_for_call(
         &mut self,
         chunk_index: usize,
@@ -193,6 +236,68 @@ impl JitSession {
         }
 
         self.cache[chunk_index] = CacheEntry::Rejected;
+        Ok(None)
+    }
+
+    pub fn try_compile_for_dynamic_call(
+        &mut self,
+        cache_key: usize,
+        chunk: &BytecodeChunk,
+        args: &[Value],
+    ) -> Result<Option<i64>, BackendError> {
+        self.ensure_slot(cache_key);
+        match &self.cache[cache_key] {
+            CacheEntry::NativeCompiled(_)
+            | CacheEntry::NativeCompiledUnary(_)
+            | CacheEntry::NativeCompiledBinary(_)
+            | CacheEntry::NativeBranchLoop(_)
+            | CacheEntry::Rejected => {
+                return Ok(self.try_invoke_compiled_for_dynamic_call(cache_key, args));
+            }
+            CacheEntry::NativeIntLoop | CacheEntry::EvalCompiled => {
+                self.cache[cache_key] = CacheEntry::Rejected;
+                return Ok(None);
+            }
+            CacheEntry::Unknown => {}
+        }
+
+        self.compilation_attempt_count = self.compilation_attempt_count.saturating_add(1);
+
+        if let Some(module) = bytecode_to_lamina_trivial(chunk) {
+            let compiled = CompiledChunk::from_module(&module)?;
+            self.cache[cache_key] = CacheEntry::NativeCompiled(compiled);
+            return Ok(self.try_invoke_compiled_for_dynamic_call(cache_key, args));
+        }
+
+        if let Some(module) = bytecode_to_lamina_loop(chunk)
+            && let Ok(compiled) = CompiledChunk::from_module(&module)
+        {
+            self.cache[cache_key] = CacheEntry::NativeCompiled(compiled);
+            return Ok(self.try_invoke_compiled_for_dynamic_call(cache_key, args));
+        }
+
+        if args.len() == 1
+            && let Some(module) = bytecode_to_lamina_unary(chunk)
+            && let Ok(compiled) = CompiledChunkUnary::from_module(&module)
+        {
+            self.cache[cache_key] = CacheEntry::NativeCompiledUnary(compiled);
+            return Ok(self.try_invoke_compiled_for_dynamic_call(cache_key, args));
+        }
+
+        if args.len() == 2
+            && let Some(module) = bytecode_to_lamina_binary(chunk)
+            && let Ok(compiled) = CompiledChunkBinary::from_module(&module)
+        {
+            self.cache[cache_key] = CacheEntry::NativeCompiledBinary(compiled);
+            return Ok(self.try_invoke_compiled_for_dynamic_call(cache_key, args));
+        }
+
+        if let Some(limit) = extract_branch_loop_limit(chunk) {
+            self.cache[cache_key] = CacheEntry::NativeBranchLoop(limit);
+            return Ok(self.try_invoke_compiled_for_dynamic_call(cache_key, args));
+        }
+
+        self.cache[cache_key] = CacheEntry::Rejected;
         Ok(None)
     }
 

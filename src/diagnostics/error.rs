@@ -142,38 +142,87 @@ impl Diagnostic {
     }
 
     fn extract_snippet(&self, source: &str, span: Span) -> Option<String> {
-        if span.start.line == 0 {
+        const CONTEXT_WINDOW_LINES: usize = 2;
+
+        if span.start.line == 0 || span.end.line == 0 {
             return None;
         }
 
-        let line_idx = span.start.line - 1;
-        let line = source.lines().nth(line_idx)?;
-        let line_len = line.chars().count();
-        let mut out = format!("  {} | {}\n", span.start.line, line);
-
-        let start_col = span.start.column.saturating_sub(1).min(line_len);
-        let end_col = if span.start.line == span.end.line {
-            span.end.column.saturating_sub(1).min(line_len)
-        } else {
-            line_len
-        };
-        let underline_len = end_col.saturating_sub(start_col).max(1);
-        let pad = " ".repeat(span.start.line.to_string().len());
-        out.push_str(&format!(
-            "  {} | {}{}\n",
-            pad,
-            " ".repeat(start_col),
-            "^".repeat(underline_len)
-        ));
-
-        if span.end.line > span.start.line {
-            out.push_str(&format!(
-                "  {} | (span continues to {}:{})\n",
-                pad, span.end.line, span.end.column
-            ));
+        let lines: Vec<&str> = source.lines().collect();
+        if lines.is_empty() {
+            return None;
         }
 
+        let total_lines = lines.len();
+        let start_line = span.start.line.min(total_lines);
+        let end_line = span.end.line.max(start_line).min(total_lines);
+        let first_line = start_line.saturating_sub(CONTEXT_WINDOW_LINES).max(1);
+        let last_line = (end_line + CONTEXT_WINDOW_LINES).min(total_lines);
+        let gutter_width = last_line.to_string().len();
+
+        let mut out = String::new();
+        out.push_str(&format!(
+            "  --> {}:{}\n",
+            span.start.line, span.start.column
+        ));
+        out.push_str(&format!("  {} |\n", " ".repeat(gutter_width)));
+
+        for line_number in first_line..=last_line {
+            let line = lines[line_number - 1];
+            out.push_str(&format!(
+                "  {:>width$} | {}\n",
+                line_number,
+                line,
+                width = gutter_width
+            ));
+
+            if (start_line..=end_line).contains(&line_number) {
+                let marker = Self::marker_for_line(line, span, line_number, start_line, end_line);
+                out.push_str(&format!("  {} | {}\n", " ".repeat(gutter_width), marker));
+            }
+        }
+
+        out.push_str(&format!("  {} |\n", " ".repeat(gutter_width)));
+
         Some(out)
+    }
+
+    fn marker_for_line(
+        line: &str,
+        span: Span,
+        line_number: usize,
+        start_line: usize,
+        end_line: usize,
+    ) -> String {
+        let line_len = line.chars().count();
+
+        let mut start_col = if line_number == start_line {
+            span.start.column.saturating_sub(1)
+        } else {
+            0
+        }
+        .min(line_len);
+
+        let mut end_col = if line_number == end_line {
+            span.end.column.saturating_sub(1)
+        } else {
+            line_len
+        }
+        .min(line_len);
+
+        if end_col <= start_col {
+            end_col = (start_col + 1).min(line_len.saturating_add(1));
+            start_col = start_col.min(end_col.saturating_sub(1));
+        }
+
+        let marker_len = end_col.saturating_sub(start_col).max(1);
+        let mut marker = String::new();
+        marker.push_str(&" ".repeat(start_col));
+        marker.push('^');
+        if marker_len > 1 {
+            marker.push_str(&"~".repeat(marker_len - 1));
+        }
+        marker
     }
 }
 
@@ -291,14 +340,34 @@ mod tests {
     }
 
     #[test]
-    fn format_multiline_span_marks_continuation() {
+    fn format_multiline_span_shows_context_window() {
         let span = Span {
             start: super::super::span::Position::new(1, 2, 1),
             end: super::super::span::Position::new(2, 3, 6),
         };
         let d = Diagnostic::error("JSINA-004", "span test", Some(span));
-        let s = d.format(Some("abc\ndef"));
-        assert!(s.contains("span continues to 2:3"));
+        let s = d.format(Some("abc\ndef\nghi\njkl"));
+        assert!(s.contains("--> 1:2"));
+        assert!(s.contains("1 | abc"));
+        assert!(s.contains("2 | def"));
+        assert!(s.contains("3 | ghi"));
+        assert!(s.contains("^~"));
+    }
+
+    #[test]
+    fn format_single_line_span_shows_neighbor_lines() {
+        let span = Span {
+            start: super::super::span::Position::new(3, 5, 16),
+            end: super::super::span::Position::new(3, 8, 19),
+        };
+        let d = Diagnostic::error("JSINA-005", "single line", Some(span));
+        let s = d.format(Some("line1\nline2\nline3 content\nline4\nline5\nline6"));
+        assert!(s.contains("1 | line1"));
+        assert!(s.contains("2 | line2"));
+        assert!(s.contains("3 | line3 content"));
+        assert!(s.contains("4 | line4"));
+        assert!(s.contains("5 | line5"));
+        assert!(!s.contains("6 | line6"));
     }
 
     #[test]
