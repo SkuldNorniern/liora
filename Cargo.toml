@@ -1,7 +1,13 @@
 [package]
-name = "jsina"
+name = "liora"
 version = "0.1.0"
 edition = "2024"
 
+lto = true
+codegen-units = 1
+opt-level = 3
+
 [dependencies]
-lamina = "0.0.8"
+# Use the local Lamina clone with runtime JIT + nightly optimizations.
+lamina = { path = "../lamina", features = ["encoder", "nightly"] }
+inksac = "0.5.0"

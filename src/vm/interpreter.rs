@@ -931,10 +931,12 @@ pub fn interpret_program_with_heap_and_entry(
                 let key_str = value_to_prop_key(&key);
                 let result = match &obj_val {
                     Value::Object(id) => {
+                        state.getprop_cache.invalidate(*id, false, &key_str);
                         heap.delete_prop(*id, &key_str);
                         true
                     }
                     Value::Array(id) => {
+                        state.getprop_cache.invalidate(*id, true, &key_str);
                         if key_str == "length" {
                             false
                         } else {
@@ -1234,8 +1236,26 @@ pub fn interpret_program_with_heap_and_entry(
                 let argc = read_u8(code, pc + 1) as usize;
                 pc += 2;
                 let call_pc = trace_pc;
+                let mut has_eval_scope = false;
+                if builtins::category(builtin_id) == "Global" && builtins::name(builtin_id) == "eval" {
+                    let mut eval_scope_bindings = Vec::with_capacity(chunk.named_locals.len());
+                    for (name, slot) in &chunk.named_locals {
+                        let slot_index = *slot as usize;
+                        if slot_index < num_locals
+                            && let Some(value) = state.stack.get(stack_base + slot_index)
+                        {
+                            eval_scope_bindings.push((name.clone(), value.clone()));
+                        }
+                    }
+                    heap.set_eval_scope_bindings(eval_scope_bindings);
+                    has_eval_scope = true;
+                }
                 let mut ctx = builtins::BuiltinContext { heap };
-                match execute_builtin(builtin_id, argc, &mut state.stack, &mut ctx) {
+                let builtin_result = execute_builtin(builtin_id, argc, &mut state.stack, &mut ctx);
+                if has_eval_scope {
+                    heap.clear_eval_scope_bindings();
+                }
+                match builtin_result {
                     Ok(BuiltinResult::Push(v)) => {
                         state.getprop_cache.invalidate_all();
                         state.stack.push(v);
@@ -1357,6 +1377,10 @@ pub fn interpret_program_with_heap_and_entry(
                         }
                     }
                     Value::DynamicFunction(heap_idx) => {
+                        let this_value = match receiver {
+                            Value::Undefined | Value::Null => Value::Object(heap.global_object()),
+                            other => other,
+                        };
                         let callee_chunk = heap
                             .dynamic_chunks
                             .get(heap_idx)
@@ -1399,7 +1423,7 @@ pub fn interpret_program_with_heap_and_entry(
                             pc: 0,
                             stack_base,
                             num_locals,
-                            this_value: receiver,
+                            this_value,
                             rethrow_after_finally: false,
                             new_object: None,
                             dynamic_function_id: Some(heap_idx),
@@ -1408,6 +1432,10 @@ pub fn interpret_program_with_heap_and_entry(
                         });
                     }
                     Value::Function(func_idx) => {
+                        let this_value = match receiver {
+                            Value::Undefined | Value::Null => Value::Object(heap.global_object()),
+                            other => other,
+                        };
                         let callee_chunk = program
                             .chunks
                             .get(func_idx)
@@ -1436,7 +1464,7 @@ pub fn interpret_program_with_heap_and_entry(
                             pc: 0,
                             stack_base: callee_stack_base,
                             num_locals: state.stack.len() - callee_stack_base,
-                            this_value: receiver,
+                            this_value,
                             rethrow_after_finally: false,
                             new_object: None,
                             dynamic_function_id: None,
@@ -1876,6 +1904,19 @@ pub fn interpret_program_with_heap_and_entry(
                     ConstEntry::Int(n) => n.to_string(),
                     _ => return Err(VmError::InvalidConstIndex(key_idx)),
                 };
+                if matches!(obj, Value::Undefined | Value::Null) {
+                    let thrown = create_native_error(
+                        heap,
+                        "TypeError",
+                        format!("Cannot read properties of {}", obj),
+                    );
+                    if let Some(completion) =
+                        propagate_call_throw(program, &mut state, &chunk, trace_pc, thrown)?
+                    {
+                        return Ok(completion);
+                    }
+                    continue;
+                }
                 let result = resolve_get_prop(&obj, &key_str, Some(&mut state.getprop_cache), heap);
                 state.stack.push(result);
             }
@@ -1914,6 +1955,19 @@ pub fn interpret_program_with_heap_and_entry(
                 let key = state.stack.pop().ok_or_else(underflow)?;
                 let obj = state.stack.pop().ok_or_else(underflow)?;
                 let key_str = value_to_prop_key_with_heap(&key, heap);
+                if matches!(obj, Value::Undefined | Value::Null) {
+                    let thrown = create_native_error(
+                        heap,
+                        "TypeError",
+                        format!("Cannot read properties of {}", obj),
+                    );
+                    if let Some(completion) =
+                        propagate_call_throw(program, &mut state, &chunk, trace_pc, thrown)?
+                    {
+                        return Ok(completion);
+                    }
+                    continue;
+                }
                 let result = resolve_get_prop(&obj, &key_str, None, heap);
                 state.stack.push(result);
             }
@@ -1943,6 +1997,19 @@ pub fn interpret_program_with_heap_and_entry(
                     ConstEntry::Int(n) => n.to_string(),
                     _ => return Err(VmError::InvalidConstIndex(key_idx)),
                 };
+                if matches!(obj, Value::Undefined | Value::Null) {
+                    let thrown = create_native_error(
+                        heap,
+                        "TypeError",
+                        format!("Cannot read properties of {}", obj),
+                    );
+                    if let Some(completion) =
+                        propagate_call_throw(program, &mut state, &chunk, trace_pc, thrown)?
+                    {
+                        return Ok(completion);
+                    }
+                    continue;
+                }
                 let result = resolve_get_prop(&obj, &key_str, Some(&mut state.getprop_cache), heap);
                 state.stack.push(result);
             }

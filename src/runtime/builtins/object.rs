@@ -25,6 +25,22 @@ fn object_static_args<'a>(args: &'a [Value], heap: &Heap) -> &'a [Value] {
     }
 }
 
+pub fn require_object_coercible(
+    args: &[Value],
+    ctx: &mut builtins::BuiltinContext<'_>,
+) -> Result<Value, builtins::BuiltinError> {
+    let value = args.first().cloned().unwrap_or(Value::Undefined);
+    if matches!(value, Value::Undefined | Value::Null) {
+        return Err(builtins::BuiltinError::Throw(super::error::type_error(
+            &[Value::String(
+                "Cannot convert undefined or null to object".to_string(),
+            )],
+            ctx.heap,
+        )));
+    }
+    Ok(value)
+}
+
 pub fn from_entries(args: &[Value], heap: &mut Heap) -> Value {
     let args = object_static_args(args, heap);
     let iterable = match args.first() {

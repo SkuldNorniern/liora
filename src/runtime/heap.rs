@@ -88,6 +88,7 @@ pub struct Heap {
     pub generator_states: Vec<GeneratorState>,
     /// Promise records. Indexed by the usize in Value::Promise.
     pub promises: Vec<PromiseRecord>,
+    eval_scope_bindings: Vec<(String, Value)>,
 }
 
 impl Default for Heap {
@@ -116,6 +117,7 @@ impl Default for Heap {
             dynamic_function_props: Vec::new(),
             generator_states: Vec::new(),
             promises: Vec::new(),
+            eval_scope_bindings: Vec::new(),
         };
         heap.init_globals();
         heap
@@ -125,6 +127,18 @@ impl Default for Heap {
 impl Heap {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn set_eval_scope_bindings(&mut self, bindings: Vec<(String, Value)>) {
+        self.eval_scope_bindings = bindings;
+    }
+
+    pub fn clear_eval_scope_bindings(&mut self) {
+        self.eval_scope_bindings.clear();
+    }
+
+    pub fn eval_scope_bindings(&self) -> Vec<(String, Value)> {
+        self.eval_scope_bindings.clone()
     }
 
     fn init_globals(&mut self) {

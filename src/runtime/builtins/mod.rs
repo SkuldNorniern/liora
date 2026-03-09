@@ -632,6 +632,11 @@ const BUILTINS: &[BuiltinDef] = &[
         name: "fromEntries",
         entry: BuiltinEntry::Normal(object::from_entries),
     },
+    BuiltinDef {
+        category: "Object",
+        name: "requireObjectCoercible",
+        entry: BuiltinEntry::Throwing(object::require_object_coercible),
+    },
     // Type 0..3 (String, Error, Number, Boolean constructors)
     BuiltinDef {
         category: "Type",
