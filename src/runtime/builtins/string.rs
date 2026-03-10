@@ -19,8 +19,15 @@ fn string_html_receiver(args: &[Value]) -> String {
     args.first().map(to_prop_key).unwrap_or_default()
 }
 
-pub fn string(args: &[Value], _heap: &mut Heap) -> Value {
-    let arg = args.first().map(|v| v.to_string()).unwrap_or_default();
+pub fn string(args: &[Value], heap: &mut Heap) -> Value {
+    let arg = match args.first() {
+        Some(Value::Symbol(id)) => match heap.symbol_description(*id) {
+            Some(description) => format!("Symbol({})", description),
+            None => "Symbol()".to_string(),
+        },
+        Some(value) => value.to_string(),
+        None => String::new(),
+    };
     Value::String(arg)
 }
 

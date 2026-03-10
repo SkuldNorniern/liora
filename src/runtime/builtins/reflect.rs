@@ -1,6 +1,6 @@
 //! Reflect builtin stubs for test262. apply throws; get/construct implement [[Get]]/[[Construct]].
 
-use super::{BuiltinContext, BuiltinError, error, to_prop_key_with_heap};
+use super::{error, to_prop_key_with_heap, BuiltinContext, BuiltinError};
 use crate::runtime::Value;
 
 fn array_like_to_values(arr: &Value, heap: &crate::runtime::Heap) -> Vec<Value> {
@@ -311,6 +311,22 @@ pub fn reflect_define_property(
     }
     let _ = super::object::define_property(a, ctx.heap);
     Ok(Value::Bool(true))
+}
+
+pub fn reflect_get_own_property_descriptor(
+    args: &[Value],
+    ctx: &mut BuiltinContext,
+) -> Result<Value, BuiltinError> {
+    let a = reflect_args(args, 2);
+    if a.len() < 2 {
+        return Err(BuiltinError::Throw(error::type_error(
+            &[Value::String(
+                "Reflect.getOwnPropertyDescriptor requires 2 arguments".to_string(),
+            )],
+            ctx.heap,
+        )));
+    }
+    Ok(super::object::get_own_property_descriptor(a, ctx.heap))
 }
 
 pub fn reflect_has(args: &[Value], ctx: &mut BuiltinContext) -> Result<Value, BuiltinError> {

@@ -245,6 +245,7 @@ mod tests {
             constants: vec![],
             num_locals: 1,
             named_locals: vec![],
+            mapped_arguments_slots: vec![],
             captured_names: vec![],
             rest_param_index: None,
             handlers: vec![],
@@ -255,11 +256,9 @@ mod tests {
         let program_chunks = vec![unsupported_chunk.clone()];
 
         for _ in 0..tiering.hot_call_threshold() {
-            assert!(
-                tiering
-                    .maybe_execute(0, &unsupported_chunk, &[], &program_chunks)
-                    .is_none()
-            );
+            assert!(tiering
+                .maybe_execute(0, &unsupported_chunk, &[], &program_chunks)
+                .is_none());
         }
 
         assert_eq!(tiering.chunk_states[0], ChunkTierState::Rejected);
@@ -278,6 +277,7 @@ mod tests {
             constants: vec![ConstEntry::Int(7)],
             num_locals: 0,
             named_locals: vec![],
+            mapped_arguments_slots: vec![],
             captured_names: vec![],
             rest_param_index: None,
             handlers: vec![],
@@ -288,11 +288,9 @@ mod tests {
         let program_chunks = vec![trivial_chunk.clone()];
 
         for _ in 0..(tiering.hot_call_threshold() - 1) {
-            assert!(
-                tiering
-                    .maybe_execute(0, &trivial_chunk, &[], &program_chunks)
-                    .is_none()
-            );
+            assert!(tiering
+                .maybe_execute(0, &trivial_chunk, &[], &program_chunks)
+                .is_none());
         }
 
         let compiled_result = tiering.maybe_execute(0, &trivial_chunk, &[], &program_chunks);
@@ -337,6 +335,7 @@ mod tests {
             constants: vec![ConstEntry::Int(1), ConstEntry::Int(0)],
             num_locals: 1,
             named_locals: vec![],
+            mapped_arguments_slots: vec![],
             captured_names: vec![],
             rest_param_index: None,
             handlers: vec![],
@@ -366,6 +365,7 @@ mod tests {
             constants: vec![ConstEntry::Int(3)],
             num_locals: 1,
             named_locals: vec![],
+            mapped_arguments_slots: vec![],
             captured_names: vec![],
             rest_param_index: None,
             handlers: vec![],

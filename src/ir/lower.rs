@@ -409,6 +409,9 @@ fn collect_function_exprs_binding(binding: &Binding, out: &mut Vec<(NodeId, Func
                 if let Some(default_init) = &elem.default_init {
                     collect_function_exprs_expr(default_init, out);
                 }
+                if let Some(binding) = &elem.binding {
+                    collect_function_exprs_binding(binding, out);
+                }
             }
         }
     }
@@ -430,7 +433,22 @@ fn collect_function_exprs_for_in_of_left(
     }
 }
 
+fn is_use_strict_statement(statement: &Statement) -> bool {
+    if let Statement::Expression(expression_statement) = statement
+        && let Expression::Literal(literal_expr) = expression_statement.expression.as_ref()
+        && let LiteralValue::String(strict_directive) = &literal_expr.value
+    {
+        return strict_directive == "use strict";
+    }
+    false
+}
+
+fn block_is_strict_body(body: &[Statement]) -> bool {
+    body.first().is_some_and(is_use_strict_statement)
+}
+
 pub fn script_to_hir(script: &Script) -> Result<Vec<HirFunction>, LowerError> {
+    let script_is_strict = block_is_strict_body(&script.body);
     let mut func_index: HashMap<String, u32> = HashMap::new();
     let mut func_decls: Vec<&FunctionDeclStmt> = Vec::new();
     let mut top_level_init_stmts: Vec<&Statement> = Vec::new();
@@ -508,7 +526,13 @@ pub fn script_to_hir(script: &Script) -> Result<Vec<HirFunction>, LowerError> {
             .collect();
         // __init__ uses functions: None — FEs resolve via func_expr_map.
         let (init_hir, _unused) =
-            compile_init_block(&init_body, &func_index_init, &func_expr_map, decl_offset)?;
+            compile_init_block(
+                &init_body,
+                &func_index_init,
+                &func_expr_map,
+                decl_offset,
+                script_is_strict,
+            )?;
         functions.push(init_hir);
         // Compile each init FE separately and append at indices 1..1+n_init_fes.
         for (_, fe) in &init_func_exprs {
@@ -520,6 +544,7 @@ pub fn script_to_hir(script: &Script) -> Result<Vec<HirFunction>, LowerError> {
                 decl_offset,
                 None,
                 None,
+                script_is_strict,
             )?);
         }
     }
@@ -544,6 +569,7 @@ pub fn script_to_hir(script: &Script) -> Result<Vec<HirFunction>, LowerError> {
             base + 1,
             None,
             None,
+            script_is_strict,
         )?;
         functions.extend(nested_funcs);
         functions[base as usize] = hir;
@@ -560,6 +586,7 @@ fn compile_init_block(
     func_index: &HashMap<String, u32>,
     func_expr_map: &HashMap<NodeId, u32>,
     functions_base: u32,
+    strict: bool,
 ) -> Result<(HirFunction, Vec<HirFunction>), LowerError> {
     let span = block.span;
     let mut ctx = LowerCtx {
@@ -588,6 +615,7 @@ fn compile_init_block(
         outer_binding_names: Vec::new(),
         with_binding_names: Vec::new(),
         inherited_with_slot_count: 0,
+        strict,
     };
     for s in &block.body {
         let _ = compile_statement(s, &mut ctx)?;
@@ -596,6 +624,8 @@ fn compile_init_block(
     let init_hir = HirFunction {
         name: Some("__init__".to_string()),
         params: Vec::new(),
+        is_strict: strict,
+        has_simple_parameter_list: true,
         num_locals: ctx.next_slot,
         named_locals: named_locals_from_map(&ctx.locals),
         captured_names: Vec::new(),
@@ -631,6 +661,7 @@ struct LowerCtx<'a> {
     outer_binding_names: Vec<String>,
     with_binding_names: Vec<String>,
     inherited_with_slot_count: usize,
+    strict: bool,
 }
 
 fn get_func_index<'a>(ctx: &'a LowerCtx<'a>) -> &'a HashMap<String, u32> {
@@ -643,6 +674,8 @@ fn hir_placeholder() -> HirFunction {
     HirFunction {
         name: None,
         params: vec![],
+        is_strict: false,
+        has_simple_parameter_list: true,
         num_locals: 0,
         named_locals: vec![],
         captured_names: vec![],
@@ -1006,7 +1039,7 @@ fn compile_binding_from_slot(
         }
         Binding::ArrayPattern(elems) => {
             for (index, elem) in elems.iter().enumerate() {
-                if let Some(name) = &elem.binding {
+                if let Some(binding) = &elem.binding {
                     let value_slot = ctx.next_slot;
                     ctx.next_slot += 1;
                     if elem.rest {
@@ -1041,14 +1074,43 @@ fn compile_binding_from_slot(
                         id: value_slot,
                         span,
                     });
-                    let target_slot = resolve_binding_slot(name, mode, missing_message, span, ctx)?;
-                    store_binding_value(
-                        target_slot,
-                        value_slot,
-                        elem.default_init.as_deref(),
-                        span,
-                        ctx,
-                    )?;
+                    match binding {
+                        Binding::Ident(name) => {
+                            let target_slot =
+                                resolve_binding_slot(name, mode, missing_message, span, ctx)?;
+                            store_binding_value(
+                                target_slot,
+                                value_slot,
+                                elem.default_init.as_deref(),
+                                span,
+                                ctx,
+                            )?;
+                        }
+                        Binding::ObjectPattern(_) | Binding::ArrayPattern(_) => {
+                            let effective_slot = if let Some(default_expr) = &elem.default_init {
+                                let merge_slot = ctx.next_slot;
+                                ctx.next_slot += 1;
+                                store_binding_value(
+                                    merge_slot,
+                                    value_slot,
+                                    Some(default_expr.as_ref()),
+                                    span,
+                                    ctx,
+                                )?;
+                                merge_slot
+                            } else {
+                                value_slot
+                            };
+                            compile_binding_from_slot(
+                                binding,
+                                effective_slot,
+                                mode,
+                                missing_message,
+                                span,
+                                ctx,
+                            )?;
+                        }
+                    }
                 }
             }
         }
@@ -1459,9 +1521,14 @@ fn emit_param_preamble(
     ctx: &mut LowerCtx<'_>,
 ) -> Result<(), LowerError> {
     for (idx, param) in params.iter().enumerate() {
-        if let Param::Default(_, default_expr) = param {
-            let param_slot = ctx.locals[&param_names[idx]];
-            emit_default_param(param_slot, default_expr, ctx)?;
+        match param {
+            Param::Default(_, default_expr)
+            | Param::ObjectPatternDefault(_, default_expr)
+            | Param::ArrayPatternDefault(_, default_expr) => {
+                let param_slot = ctx.locals[&param_names[idx]];
+                emit_default_param(param_slot, default_expr, ctx)?;
+            }
+            _ => {}
         }
     }
     for (synthetic_name, binding) in pattern_params {
@@ -1486,8 +1553,15 @@ fn compile_function(
     functions_base: u32,
     outer_binding_names: Option<Vec<String>>,
     outer_with_binding_names: Option<Vec<String>>,
+    inherited_strict: bool,
 ) -> Result<HirFunction, LowerError> {
     let span = f.span;
+    let function_is_strict = inherited_strict
+        || match f.body.as_ref() {
+            Statement::Block(block_statement) => block_is_strict_body(&block_statement.body),
+            _ => false,
+        };
+    let has_simple_parameter_list = f.params.iter().all(|param| matches!(param, Param::Ident(_)));
     let mut ctx = LowerCtx {
         blocks: vec![HirBlock {
             id: 0,
@@ -1514,6 +1588,7 @@ fn compile_function(
         outer_binding_names: outer_binding_names.unwrap_or_default(),
         with_binding_names: outer_with_binding_names.unwrap_or_default(),
         inherited_with_slot_count: 0,
+        strict: function_is_strict,
     };
 
     let (param_names, pattern_params) = build_param_names_and_patterns(&f.params);
@@ -1550,6 +1625,8 @@ fn compile_function(
     Ok(HirFunction {
         name: Some(f.name.clone()),
         params: param_names,
+        is_strict: function_is_strict,
+        has_simple_parameter_list,
         num_locals: ctx.next_slot,
         named_locals: named_locals_from_map(&ctx.locals),
         captured_names: ctx.captured_names,
@@ -1586,28 +1663,44 @@ fn compile_statement(stmt: &Statement, ctx: &mut LowerCtx<'_>) -> Result<bool, L
         Statement::Block(b) => {
             let mut block_func_index = get_func_index(ctx).clone();
             let mut hit_return = false;
+            let mut taken_functions = ctx.functions.take();
+            let mut preallocated_block_functions: Vec<(u32, usize)> = Vec::new();
+
+            if let Some(functions) = taken_functions.as_mut() {
+                for statement in &b.body {
+                    if let Statement::FunctionDecl(nested_function) = statement {
+                        let placeholder_index = functions.len();
+                        let function_index = ctx.functions_base + placeholder_index as u32;
+                        functions.push(hir_placeholder());
+                        block_func_index.insert(nested_function.name.clone(), function_index);
+                        preallocated_block_functions.push((function_index, placeholder_index));
+                    }
+                }
+            }
+
+            let mut preallocated_function_cursor = 0usize;
             for s in &b.body {
                 if let Statement::FunctionDecl(nested) = s {
                     let outer_binding_names: Vec<String> = ctx.locals.keys().cloned().collect();
-                    if let Some(ref mut funcs) = ctx.functions {
-                        // Pre-allocate `nested`'s slot so it has a stable index
-                        // before inner FEs (pushed during compilation) are added.
-                        let pre_alloc_pos = funcs.len();
-                        let idx = ctx.functions_base + pre_alloc_pos as u32;
-                        funcs.push(hir_placeholder());
-                        block_func_index.insert(nested.name.clone(), idx);
+                    if let Some(functions) = taken_functions.as_mut()
+                        && let Some((function_index, placeholder_index)) =
+                            preallocated_block_functions
+                                .get(preallocated_function_cursor)
+                                .copied()
+                    {
+                        preallocated_function_cursor += 1;
                         let hir = compile_function(
                             nested,
                             &block_func_index,
                             ctx.func_expr_map,
-                            Some(funcs),
+                            Some(functions),
                             ctx.functions_base,
                             Some(outer_binding_names),
                             Some(ctx.with_binding_names.clone()),
+                            ctx.strict,
                         )?;
                         let nested_captures: Vec<String> = hir.captured_names.clone();
-                        funcs[pre_alloc_pos] = hir;
-                        let _ = funcs;
+                        functions[placeholder_index] = hir;
                         for captured in nested_captures {
                             if !ctx.locals.contains_key(&captured) {
                                 get_or_alloc_capture_slot(ctx, &captured);
@@ -1619,7 +1712,7 @@ fn compile_statement(stmt: &Statement, ctx: &mut LowerCtx<'_>) -> Result<bool, L
                             s
                         });
                         ctx.blocks[ctx.current_block].ops.push(HirOp::LoadConst {
-                            value: HirConst::Function(idx),
+                            value: HirConst::Function(function_index),
                             span: nested.span,
                         });
                         ctx.blocks[ctx.current_block].ops.push(HirOp::StoreLocal {
@@ -1630,13 +1723,18 @@ fn compile_statement(stmt: &Statement, ctx: &mut LowerCtx<'_>) -> Result<bool, L
                     continue;
                 }
                 let prev = ctx.block_func_index.take();
+                let previous_functions = ctx.functions.take();
+                ctx.functions = taken_functions;
                 ctx.block_func_index = Some(block_func_index.clone());
                 hit_return = compile_statement(s, ctx)? || hit_return;
+                taken_functions = ctx.functions.take();
+                ctx.functions = previous_functions;
                 ctx.block_func_index = prev;
                 if hit_return {
                     break;
                 }
             }
+            ctx.functions = taken_functions;
             return Ok(hit_return);
         }
         Statement::Return(r) => {
@@ -3301,6 +3399,7 @@ fn compile_function_expr(fe: &FunctionExprData, ctx: &mut LowerCtx<'_>) -> Resul
             ctx.functions_base,
             Some(ctx.locals.keys().cloned().collect()),
             Some(ctx.with_binding_names.clone()),
+            ctx.strict,
         )?;
         let nested_captures: Vec<String> = hir
             .captured_names
@@ -3354,8 +3453,15 @@ fn compile_function_expr_to_hir(
     functions_base: u32,
     outer_binding_names: Option<Vec<String>>,
     outer_with_binding_names: Option<Vec<String>>,
+    inherited_strict: bool,
 ) -> Result<HirFunction, LowerError> {
     let span = fe.span;
+    let function_is_strict = inherited_strict
+        || match fe.body.as_ref() {
+            Statement::Block(block_statement) => block_is_strict_body(&block_statement.body),
+            _ => false,
+        };
+    let has_simple_parameter_list = fe.params.iter().all(|param| matches!(param, Param::Ident(_)));
     let mut ctx = LowerCtx {
         blocks: vec![HirBlock {
             id: 0,
@@ -3382,6 +3488,7 @@ fn compile_function_expr_to_hir(
         outer_binding_names: outer_binding_names.unwrap_or_default(),
         with_binding_names: outer_with_binding_names.unwrap_or_default(),
         inherited_with_slot_count: 0,
+        strict: function_is_strict,
     };
     let (param_names, pattern_params) = build_param_names_and_patterns(&fe.params);
     let rest_param_index = fe.params.iter().position(|p| p.is_rest()).map(|i| i as u32);
@@ -3414,6 +3521,8 @@ fn compile_function_expr_to_hir(
     Ok(HirFunction {
         name: fe.name.clone(),
         params: param_names,
+        is_strict: function_is_strict,
+        has_simple_parameter_list,
         num_locals: ctx.next_slot,
         named_locals: named_locals_from_map(&ctx.locals),
         captured_names: ctx.captured_names,
@@ -3770,14 +3879,28 @@ fn expr_to_binding_for_assign(expr: &Expression) -> Option<Binding> {
                 match el {
                     ArrayElement::Expr(Expression::Identifier(id)) => {
                         elems.push(ArrayPatternElem {
-                            binding: Some(id.name.clone()),
+                            binding: Some(Binding::Ident(id.name.clone())),
                             default_init: None,
                             rest: false,
                         });
                     }
-                    ArrayElement::Expr(Expression::ObjectLiteral(_))
-                    | ArrayElement::Expr(Expression::ArrayLiteral(_)) => {
-                        return None;
+                    ArrayElement::Expr(Expression::ObjectLiteral(inner)) => {
+                        let nested =
+                            expr_to_binding_for_assign(&Expression::ObjectLiteral(inner.clone()))?;
+                        elems.push(ArrayPatternElem {
+                            binding: Some(nested),
+                            default_init: None,
+                            rest: false,
+                        });
+                    }
+                    ArrayElement::Expr(Expression::ArrayLiteral(inner)) => {
+                        let nested =
+                            expr_to_binding_for_assign(&Expression::ArrayLiteral(inner.clone()))?;
+                        elems.push(ArrayPatternElem {
+                            binding: Some(nested),
+                            default_init: None,
+                            rest: false,
+                        });
                     }
                     ArrayElement::Hole => {
                         elems.push(ArrayPatternElem {
@@ -3788,7 +3911,25 @@ fn expr_to_binding_for_assign(expr: &Expression) -> Option<Binding> {
                     }
                     ArrayElement::Spread(Expression::Identifier(id)) => {
                         elems.push(ArrayPatternElem {
-                            binding: Some(id.name.clone()),
+                            binding: Some(Binding::Ident(id.name.clone())),
+                            default_init: None,
+                            rest: true,
+                        });
+                    }
+                    ArrayElement::Spread(Expression::ObjectLiteral(inner)) => {
+                        let nested =
+                            expr_to_binding_for_assign(&Expression::ObjectLiteral(inner.clone()))?;
+                        elems.push(ArrayPatternElem {
+                            binding: Some(nested),
+                            default_init: None,
+                            rest: true,
+                        });
+                    }
+                    ArrayElement::Spread(Expression::ArrayLiteral(inner)) => {
+                        let nested =
+                            expr_to_binding_for_assign(&Expression::ArrayLiteral(inner.clone()))?;
+                        elems.push(ArrayPatternElem {
+                            binding: Some(nested),
                             default_init: None,
                             rest: true,
                         });
@@ -4931,14 +5072,6 @@ fn compile_identifier_default(e: &IdentifierExpr, ctx: &mut LowerCtx<'_>) -> Res
                 span: e.span,
             },
         );
-    } else if let Some(idx) = func_idx {
-        op(
-            ctx,
-            HirOp::LoadConst {
-                value: HirConst::Function(idx),
-                span: e.span,
-            },
-        );
     } else if ctx.allow_function_captures
         && ctx
             .outer_binding_names
@@ -4955,6 +5088,14 @@ fn compile_identifier_default(e: &IdentifierExpr, ctx: &mut LowerCtx<'_>) -> Res
         }
     } else if ctx.allow_function_captures {
         compile_load_global_identifier(&e.name, e.span, true, ctx);
+    } else if let Some(idx) = func_idx {
+        op(
+            ctx,
+            HirOp::LoadConst {
+                value: HirConst::Function(idx),
+                span: e.span,
+            },
+        );
     } else {
         return Err(LowerError::Unsupported(
             format!("undefined variable '{}'", e.name),
@@ -5168,14 +5309,6 @@ fn compile_identifier_without_capture_alloc(
                 span: e.span,
             },
         );
-    } else if let Some(idx) = func_idx {
-        op(
-            ctx,
-            HirOp::LoadConst {
-                value: HirConst::Function(idx),
-                span: e.span,
-            },
-        );
     } else if ctx.allow_function_captures
         && ctx
             .outer_binding_names
@@ -5192,6 +5325,14 @@ fn compile_identifier_without_capture_alloc(
         }
     } else if ctx.allow_function_captures {
         compile_load_global_identifier(&e.name, e.span, true, ctx);
+    } else if let Some(idx) = func_idx {
+        op(
+            ctx,
+            HirOp::LoadConst {
+                value: HirConst::Function(idx),
+                span: e.span,
+            },
+        );
     } else {
         return Err(LowerError::Unsupported(
             format!("undefined variable '{}'", e.name),
@@ -5207,23 +5348,167 @@ fn emit_with_has_binding_check(
     span: Span,
     ctx: &mut LowerCtx<'_>,
 ) -> u32 {
+    let found_slot = alloc_slot(ctx);
+    let blocked_slot = alloc_slot(ctx);
+    let unscopables_slot = alloc_slot(ctx);
     let cond_slot = alloc_slot(ctx);
+
     op(ctx, HirOp::LoadLocal { id: with_slot, span });
     op(
         ctx,
+        HirOp::LoadConst {
+            value: HirConst::String(name.to_string()),
+            span,
+        },
+    );
+    op(
+        ctx,
+        HirOp::CallBuiltin {
+            builtin: b("Proxy", "has"),
+            argc: 2,
+            span,
+        },
+    );
+    op(
+        ctx,
+        HirOp::StoreLocal {
+            id: found_slot,
+            span,
+        },
+    );
+
+    let has_property_block = new_block(ctx, span);
+    let no_binding_block = new_block(ctx, span);
+    let merge_block = new_block(ctx, span);
+    set_term(
+        ctx,
+        HirTerminator::Branch {
+            cond: found_slot,
+            then_block: has_property_block,
+            else_block: no_binding_block,
+        },
+    );
+
+    ctx.current_block = no_binding_block as usize;
+    op(
+        ctx,
+        HirOp::LoadConst {
+            value: HirConst::Bool(false),
+            span,
+        },
+    );
+    op(
+        ctx,
+        HirOp::StoreLocal {
+            id: cond_slot,
+            span,
+        },
+    );
+    set_term(ctx, HirTerminator::Jump { target: merge_block });
+
+    ctx.current_block = has_property_block as usize;
+    op(ctx, HirOp::LoadLocal { id: with_slot, span });
+    op(
+        ctx,
+        HirOp::LoadConst {
+            value: HirConst::Global("Symbol".to_string()),
+            span,
+        },
+    );
+    op(
+        ctx,
         HirOp::GetProp {
-            key: name.to_string(),
+            key: "unscopables".to_string(),
+            span,
+        },
+    );
+    op(
+        ctx,
+        HirOp::CallBuiltin {
+            builtin: b("Proxy", "get"),
+            argc: 2,
+            span,
+        },
+    );
+    op(
+        ctx,
+        HirOp::StoreLocal {
+            id: unscopables_slot,
+            span,
+        },
+    );
+
+    op(
+        ctx,
+        HirOp::LoadLocal {
+            id: unscopables_slot,
             span,
         },
     );
     op(
         ctx,
         HirOp::LoadConst {
-            value: HirConst::Undefined,
+            value: HirConst::String(name.to_string()),
             span,
         },
     );
-    op(ctx, HirOp::StrictNotEq { span });
+    op(
+        ctx,
+        HirOp::CallBuiltin {
+            builtin: b("Proxy", "get"),
+            argc: 2,
+            span,
+        },
+    );
+    op(ctx, HirOp::Not { span });
+    op(ctx, HirOp::Not { span });
+    op(
+        ctx,
+        HirOp::StoreLocal {
+            id: blocked_slot,
+            span,
+        },
+    );
+    op(
+        ctx,
+        HirOp::LoadLocal {
+            id: blocked_slot,
+            span,
+        },
+    );
+    op(ctx, HirOp::Not { span });
+    op(
+        ctx,
+        HirOp::StoreLocal {
+            id: cond_slot,
+            span,
+        },
+    );
+    set_term(ctx, HirTerminator::Jump { target: merge_block });
+
+    ctx.current_block = merge_block as usize;
+    cond_slot
+}
+
+fn emit_with_has_property_check(with_slot: u32, name: &str, span: Span, ctx: &mut LowerCtx<'_>) -> u32 {
+    let cond_slot = alloc_slot(ctx);
+
+    op(ctx, HirOp::LoadLocal { id: with_slot, span });
+    op(
+        ctx,
+        HirOp::LoadConst {
+            value: HirConst::String(name.to_string()),
+            span,
+        },
+    );
+    op(
+        ctx,
+        HirOp::CallBuiltin {
+            builtin: b("Proxy", "has"),
+            argc: 2,
+            span,
+        },
+    );
     op(
         ctx,
         HirOp::StoreLocal {
@@ -5259,6 +5544,18 @@ fn compile_identifier_with(e: &IdentifierExpr, ctx: &mut LowerCtx<'_>) -> Result
         );
 
         ctx.current_block = found_block as usize;
+        let still_exists_slot = emit_with_has_property_check(*with_slot, &e.name, e.span, ctx);
+        let read_block = new_block(ctx, e.span);
+        set_term(
+            ctx,
+            HirTerminator::Branch {
+                cond: still_exists_slot,
+                then_block: read_block,
+                else_block: miss_block,
+            },
+        );
+
+        ctx.current_block = read_block as usize;
         op(
             ctx,
             HirOp::LoadLocal {
@@ -5268,8 +5565,16 @@ fn compile_identifier_with(e: &IdentifierExpr, ctx: &mut LowerCtx<'_>) -> Result
         );
         op(
             ctx,
-            HirOp::GetProp {
-                key: e.name.clone(),
+            HirOp::LoadConst {
+                value: HirConst::String(e.name.clone()),
+                span: e.span,
+            },
+        );
+        op(
+            ctx,
+            HirOp::CallBuiltin {
+                builtin: b("Proxy", "get"),
+                argc: 2,
                 span: e.span,
             },
         );
@@ -5466,10 +5771,23 @@ fn compile_identifier_assignment_with(
     );
 
     let merge_block = new_block(ctx, assign_expr.span);
+    let descriptor_slot = alloc_slot(ctx);
+    let proxy_post_write_slot = alloc_slot(ctx);
+    let likely_compound_assignment = matches!(
+        assign_expr.right.as_ref(),
+        Expression::Binary(binary_expression)
+            if matches!(
+                binary_expression.left.as_ref(),
+                Expression::Identifier(left_identifier) if left_identifier.name == id.name
+            )
+    );
     let with_slots = ctx.with_object_slots.clone();
     for with_slot in with_slots.iter().rev() {
-        let cond_slot =
-            emit_with_has_binding_check(*with_slot, &id.name, assign_expr.span, ctx);
+        let cond_slot = if likely_compound_assignment {
+            emit_with_has_property_check(*with_slot, &id.name, assign_expr.span, ctx)
+        } else {
+            emit_with_has_binding_check(*with_slot, &id.name, assign_expr.span, ctx)
+        };
         let found_block = new_block(ctx, assign_expr.span);
         let miss_block = new_block(ctx, assign_expr.span);
         set_term(
@@ -5482,10 +5800,143 @@ fn compile_identifier_assignment_with(
         );
 
         ctx.current_block = found_block as usize;
+        if !likely_compound_assignment {
+            let still_exists_slot =
+                emit_with_has_property_check(*with_slot, &id.name, assign_expr.span, ctx);
+            let write_block = new_block(ctx, assign_expr.span);
+            set_term(
+                ctx,
+                HirTerminator::Branch {
+                    cond: still_exists_slot,
+                    then_block: write_block,
+                    else_block: miss_block,
+                },
+            );
+            ctx.current_block = write_block as usize;
+        }
         op(
             ctx,
             HirOp::LoadLocal {
                 id: *with_slot,
+                span: assign_expr.span,
+            },
+        );
+        op(
+            ctx,
+            HirOp::LoadConst {
+                value: HirConst::String(id.name.clone()),
+                span: assign_expr.span,
+            },
+        );
+        op(
+            ctx,
+            HirOp::LoadLocal {
+                id: value_slot,
+                span: assign_expr.span,
+            },
+        );
+        op(
+            ctx,
+            HirOp::LoadLocal {
+                id: *with_slot,
+                span: assign_expr.span,
+            },
+        );
+        op(
+            ctx,
+            HirOp::CallBuiltin {
+                builtin: b("Proxy", "set"),
+                argc: 4,
+                span: assign_expr.span,
+            },
+        );
+        op(
+            ctx,
+            HirOp::Pop {
+                span: assign_expr.span,
+            },
+        );
+
+        op(
+            ctx,
+            HirOp::LoadLocal {
+                id: *with_slot,
+                span: assign_expr.span,
+            },
+        );
+        op(
+            ctx,
+            HirOp::CallBuiltin {
+                builtin: b("Proxy", "isProxy"),
+                argc: 1,
+                span: assign_expr.span,
+            },
+        );
+        op(
+            ctx,
+            HirOp::StoreLocal {
+                id: proxy_post_write_slot,
+                span: assign_expr.span,
+            },
+        );
+
+        let proxy_followup_block = new_block(ctx, assign_expr.span);
+        let no_proxy_followup_block = new_block(ctx, assign_expr.span);
+        set_term(
+            ctx,
+            HirTerminator::Branch {
+                cond: proxy_post_write_slot,
+                then_block: proxy_followup_block,
+                else_block: no_proxy_followup_block,
+            },
+        );
+
+        ctx.current_block = proxy_followup_block as usize;
+        op(
+            ctx,
+            HirOp::LoadLocal {
+                id: *with_slot,
+                span: assign_expr.span,
+            },
+        );
+        op(
+            ctx,
+            HirOp::LoadConst {
+                value: HirConst::String(id.name.clone()),
+                span: assign_expr.span,
+            },
+        );
+        op(
+            ctx,
+            HirOp::CallBuiltin {
+                builtin: b("Proxy", "getOwnPropertyDescriptor"),
+                argc: 2,
+                span: assign_expr.span,
+            },
+        );
+        op(
+            ctx,
+            HirOp::Pop {
+                span: assign_expr.span,
+            },
+        );
+        op(
+            ctx,
+            HirOp::NewObject {
+                span: assign_expr.span,
+            },
+        );
+        op(
+            ctx,
+            HirOp::StoreLocal {
+                id: descriptor_slot,
+                span: assign_expr.span,
+            },
+        );
+        op(
+            ctx,
+            HirOp::LoadLocal {
+                id: descriptor_slot,
                 span: assign_expr.span,
             },
         );
@@ -5505,7 +5956,7 @@ fn compile_identifier_assignment_with(
         op(
             ctx,
             HirOp::SetProp {
-                key: id.name.clone(),
+                key: "value".to_string(),
                 span: assign_expr.span,
             },
         );
@@ -5515,6 +5966,44 @@ fn compile_identifier_assignment_with(
                 span: assign_expr.span,
             },
         );
+        op(
+            ctx,
+            HirOp::LoadLocal {
+                id: *with_slot,
+                span: assign_expr.span,
+            },
+        );
+        op(
+            ctx,
+            HirOp::LoadConst {
+                value: HirConst::String(id.name.clone()),
+                span: assign_expr.span,
+            },
+        );
+        op(
+            ctx,
+            HirOp::LoadLocal {
+                id: descriptor_slot,
+                span: assign_expr.span,
+            },
+        );
+        op(
+            ctx,
+            HirOp::CallBuiltin {
+                builtin: b("Proxy", "defineProperty"),
+                argc: 3,
+                span: assign_expr.span,
+            },
+        );
+        op(
+            ctx,
+            HirOp::Pop {
+                span: assign_expr.span,
+            },
+        );
+        set_term(ctx, HirTerminator::Jump { target: merge_block });
+
+        ctx.current_block = no_proxy_followup_block as usize;
         set_term(ctx, HirTerminator::Jump { target: merge_block });
 
         ctx.current_block = miss_block as usize;
@@ -5558,6 +6047,18 @@ fn compile_identifier_call_with(
         );
 
         ctx.current_block = found_block as usize;
+        let still_exists_slot = emit_with_has_property_check(*with_slot, &id.name, call_expr.span, ctx);
+        let read_block = new_block(ctx, call_expr.span);
+        set_term(
+            ctx,
+            HirTerminator::Branch {
+                cond: still_exists_slot,
+                then_block: read_block,
+                else_block: miss_block,
+            },
+        );
+
+        ctx.current_block = read_block as usize;
         op(
             ctx,
             HirOp::LoadLocal {
@@ -5581,8 +6082,16 @@ fn compile_identifier_call_with(
         );
         op(
             ctx,
-            HirOp::GetProp {
-                key: id.name.clone(),
+            HirOp::LoadConst {
+                value: HirConst::String(id.name.clone()),
+                span: call_expr.span,
+            },
+        );
+        op(
+            ctx,
+            HirOp::CallBuiltin {
+                builtin: b("Proxy", "get"),
+                argc: 2,
                 span: call_expr.span,
             },
         );

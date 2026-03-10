@@ -8,6 +8,8 @@ pub fn opcode_name(op: u8) -> &'static str {
         x if x == Opcode::Swap as u8 => "Swap",
         x if x == Opcode::LoadLocal as u8 => "LoadLocal",
         x if x == Opcode::StoreLocal as u8 => "StoreLocal",
+        x if x == Opcode::LoadLocal16 as u8 => "LoadLocal16",
+        x if x == Opcode::StoreLocal16 as u8 => "StoreLocal16",
         x if x == Opcode::LoadThis as u8 => "LoadThis",
         x if x == Opcode::Add as u8 => "Add",
         x if x == Opcode::Sub as u8 => "Sub",
@@ -106,6 +108,20 @@ pub fn disassemble(chunk: &BytecodeChunk) -> String {
                 let slot = code.get(pc).copied().unwrap_or(0);
                 pc += 1;
                 format!("  {:04}  StoreLocal  {}", line_start, slot)
+            }
+            x if x == Opcode::LoadLocal16 as u8 => {
+                let lo = code.get(pc).copied().unwrap_or(0) as usize;
+                let hi = code.get(pc + 1).copied().unwrap_or(0) as usize;
+                let slot = lo | (hi << 8);
+                pc += 2;
+                format!("  {:04}  LoadLocal16  {}", line_start, slot)
+            }
+            x if x == Opcode::StoreLocal16 as u8 => {
+                let lo = code.get(pc).copied().unwrap_or(0) as usize;
+                let hi = code.get(pc + 1).copied().unwrap_or(0) as usize;
+                let slot = lo | (hi << 8);
+                pc += 2;
+                format!("  {:04}  StoreLocal16  {}", line_start, slot)
             }
             x if x == Opcode::LoadThis as u8 => format!("  {:04}  LoadThis", line_start),
             x if x == Opcode::Add as u8 => format!("  {:04}  Add", line_start),
@@ -278,6 +294,7 @@ mod tests {
             constants: vec![ConstEntry::Int(42)],
             num_locals: 0,
             named_locals: vec![],
+            mapped_arguments_slots: vec![],
             captured_names: vec![],
             rest_param_index: None,
             handlers: vec![],

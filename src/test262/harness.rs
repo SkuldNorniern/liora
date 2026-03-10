@@ -51,6 +51,36 @@ assert.notSameValue = function (actual, unexpected, message) {
   message = message + 'Expected SameValue(' + assert._toString(actual) + ', ' + assert._toString(unexpected) + ') to be false';
   throw new Test262Error(message);
 };
+assert.throws = function (expectedErrorConstructor, func, message) {
+  var expectedName, actualName;
+  if (typeof func !== "function") {
+    throw new Test262Error('assert.throws requires two arguments: the error constructor and a function to run');
+  }
+  if (message === undefined) {
+    message = '';
+  } else {
+    message += ' ';
+  }
+
+  try {
+    func();
+  } catch (thrown) {
+    if (typeof thrown !== 'object' || thrown === null) {
+      throw new Test262Error(message + 'Thrown value was not an object!');
+    }
+    if (thrown.constructor !== expectedErrorConstructor) {
+      expectedName = expectedErrorConstructor && expectedErrorConstructor.name;
+      actualName = thrown && thrown.constructor && thrown.constructor.name;
+      if (expectedName === actualName) {
+        throw new Test262Error(message + 'Expected a ' + expectedName + ' but got a different error constructor with the same name');
+      }
+      throw new Test262Error(message + 'Expected a ' + expectedName + ' but got a ' + actualName);
+    }
+    return;
+  }
+
+  throw new Test262Error(message + 'Expected a ' + expectedErrorConstructor.name + ' to be thrown but no exception was thrown at all');
+};
 function $DONOTEVALUATE() {
   throw "Test262: This statement should not be evaluated.";
 }
@@ -58,8 +88,20 @@ function $DONOTEVALUATE() {
 
 const HARNESS_FILES: &[&str] = &["sta.js", "assert.js"];
 
+fn resolve_harness_dir(root: &Path) -> Option<std::path::PathBuf> {
+    let direct = root.join("harness");
+    if direct.is_dir() {
+        return Some(direct);
+    }
+    let tmp_harness = root.join("tmp").join("harness");
+    if tmp_harness.is_dir() {
+        return Some(tmp_harness);
+    }
+    None
+}
+
 fn load_harness_from_dir(root: &Path) -> Option<String> {
-    let harness_dir = root.join("harness");
+    let harness_dir = resolve_harness_dir(root)?;
     let mut out = String::new();
     for name in HARNESS_FILES {
         let path = harness_dir.join(name);
@@ -86,7 +128,7 @@ fn load_harness(root: Option<&Path>) -> String {
 }
 
 fn load_include(root: &Path, name: &str) -> Option<String> {
-    let path = root.join("harness").join(name);
+    let path = resolve_harness_dir(root)?.join(name);
     std::fs::read_to_string(&path).ok()
 }
 
@@ -195,15 +237,13 @@ fn append_include_to_prelude(prelude: &mut String, name: &str, content: &str) {
     prelude.push('\n');
     for define in parse_include_defines(content) {
         if is_js_identifier(&define) {
-            prelude.push_str("var ");
+            prelude.push_str("if (typeof ");
             prelude.push_str(&define);
-            prelude.push_str(" = (typeof ");
+            prelude.push_str(" !== \"undefined\") { globalThis.");
             prelude.push_str(&define);
-            prelude.push_str(" !== \"undefined\") ? ");
+            prelude.push_str(" = ");
             prelude.push_str(&define);
-            prelude.push_str(" : globalThis.");
-            prelude.push_str(&define);
-            prelude.push_str(";\n");
+            prelude.push_str("; }\n");
         }
     }
     for function_name in parse_include_function_names(content) {
@@ -300,11 +340,11 @@ fn build_prelude(root: Option<&Path>, meta: Option<&TestMetadata>) -> (String, b
         prelude.push_str("globalThis.__test262AsyncDoneCalled = false;\n");
         prelude.push_str("globalThis.__test262AsyncDoneError = undefined;\n");
         prelude.push_str("if (typeof $DONE === \"function\") {\n");
-        prelude.push_str("  var __jsinaDone = $DONE;\n");
+        prelude.push_str("  var __lioraDone = $DONE;\n");
         prelude.push_str("  $DONE = function (error) {\n");
         prelude.push_str("    globalThis.__test262AsyncDoneCalled = true;\n");
         prelude.push_str("    globalThis.__test262AsyncDoneError = error;\n");
-        prelude.push_str("    return __jsinaDone(error);\n");
+        prelude.push_str("    return __lioraDone(error);\n");
         prelude.push_str("  };\n");
         prelude.push_str("}\n");
     }

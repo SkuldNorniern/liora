@@ -281,7 +281,7 @@ pub struct ObjectPatternProp {
 
 #[derive(Debug, Clone)]
 pub struct ArrayPatternElem {
-    pub binding: Option<String>,
+    pub binding: Option<Binding>,
     pub default_init: Option<Box<Expression>>,
     pub rest: bool,
 }
@@ -299,7 +299,13 @@ impl Binding {
                 })
                 .collect(),
             Binding::ArrayPattern(elems) => {
-                elems.iter().filter_map(|e| e.binding.as_deref()).collect()
+                let mut names = Vec::new();
+                for elem in elems {
+                    if let Some(binding) = &elem.binding {
+                        names.extend(binding.names());
+                    }
+                }
+                names
             }
         }
     }
@@ -321,24 +327,35 @@ pub enum Param {
     Ident(String),
     Default(String, Box<Expression>),
     Rest(String),
+    RestPattern(Binding),
     ObjectPattern(Vec<ObjectPatternProp>),
     ArrayPattern(Vec<ArrayPatternElem>),
+    ObjectPatternDefault(Vec<ObjectPatternProp>, Box<Expression>),
+    ArrayPatternDefault(Vec<ArrayPatternElem>, Box<Expression>),
 }
 
 impl Param {
     pub fn name(&self) -> &str {
         match self {
             Param::Ident(n) | Param::Default(n, _) | Param::Rest(n) => n,
-            Param::ObjectPattern(_) | Param::ArrayPattern(_) => "",
+            Param::RestPattern(_)
+            | Param::ObjectPattern(_)
+            | Param::ArrayPattern(_)
+            | Param::ObjectPatternDefault(_, _)
+            | Param::ArrayPatternDefault(_, _) => "",
         }
     }
 
     pub fn is_rest(&self) -> bool {
-        matches!(self, Param::Rest(_))
+        matches!(self, Param::Rest(_) | Param::RestPattern(_))
     }
 
     pub fn as_binding(&self, index: usize) -> Option<(String, crate::frontend::ast::Binding)> {
         match self {
+            Param::RestPattern(binding) => {
+                let synthetic = format!("__param_{}__", index);
+                Some((synthetic, binding.clone()))
+            }
             Param::ObjectPattern(props) => {
                 let synthetic = format!("__param_{}__", index);
                 Some((
@@ -347,6 +364,20 @@ impl Param {
                 ))
             }
             Param::ArrayPattern(elems) => {
+                let synthetic = format!("__param_{}__", index);
+                Some((
+                    synthetic,
+                    crate::frontend::ast::Binding::ArrayPattern(elems.clone()),
+                ))
+            }
+            Param::ObjectPatternDefault(props, _) => {
+                let synthetic = format!("__param_{}__", index);
+                Some((
+                    synthetic,
+                    crate::frontend::ast::Binding::ObjectPattern(props.clone()),
+                ))
+            }
+            Param::ArrayPatternDefault(elems, _) => {
                 let synthetic = format!("__param_{}__", index);
                 Some((
                     synthetic,

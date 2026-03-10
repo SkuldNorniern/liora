@@ -566,8 +566,11 @@ impl Parser {
                 Some(TokenType::Spread)
             ) {
                 self.advance();
-                let token = self.expect(TokenType::Identifier)?;
-                params.push(crate::frontend::ast::Param::Rest(token.lexeme));
+                let (binding, _) = self.parse_binding()?;
+                match binding {
+                    Binding::Ident(name) => params.push(crate::frontend::ast::Param::Rest(name)),
+                    pattern => params.push(crate::frontend::ast::Param::RestPattern(pattern)),
+                }
                 break;
             }
             if matches!(
@@ -575,12 +578,25 @@ impl Parser {
                 Some(TokenType::LeftBrace) | Some(TokenType::LeftBracket)
             ) {
                 let (binding, _) = self.parse_binding()?;
+                let default_expr = if self.optional(TokenType::Assign) {
+                    Some(Box::new(self.parse_assignment_expression_allow_in()?))
+                } else {
+                    None
+                };
                 match binding {
                     Binding::ObjectPattern(props) => {
-                        params.push(crate::frontend::ast::Param::ObjectPattern(props));
+                        if let Some(expr) = default_expr {
+                            params.push(crate::frontend::ast::Param::ObjectPatternDefault(props, expr));
+                        } else {
+                            params.push(crate::frontend::ast::Param::ObjectPattern(props));
+                        }
                     }
                     Binding::ArrayPattern(elems) => {
-                        params.push(crate::frontend::ast::Param::ArrayPattern(elems));
+                        if let Some(expr) = default_expr {
+                            params.push(crate::frontend::ast::Param::ArrayPatternDefault(elems, expr));
+                        } else {
+                            params.push(crate::frontend::ast::Param::ArrayPattern(elems));
+                        }
                     }
                     Binding::Ident(_) => {
                         unreachable!("parse_binding starting with brace or bracket returns pattern")
@@ -598,7 +614,7 @@ impl Parser {
                 let token = self.expect(TokenType::Identifier)?;
                 let name = token.lexeme;
                 if self.optional(TokenType::Assign) {
-                    let default_expr = self.parse_expression()?;
+                    let default_expr = self.parse_assignment_expression_allow_in()?;
                     params.push(crate::frontend::ast::Param::Default(
                         name,
                         Box::new(default_expr),
@@ -1012,7 +1028,7 @@ impl Parser {
                 let param = if is_rest {
                     Param::Rest(name)
                 } else if self.optional(TokenType::Assign) {
-                    Param::Default(name, Box::new(self.parse_expression()?))
+                    Param::Default(name, Box::new(self.parse_assignment_expression_allow_in()?))
                 } else {
                     Param::Ident(name)
                 };
@@ -1125,7 +1141,7 @@ impl Parser {
                 let param = if is_rest {
                     Param::Rest(name)
                 } else if self.optional(TokenType::Assign) {
-                    Param::Default(name, Box::new(self.parse_expression()?))
+                    Param::Default(name, Box::new(self.parse_assignment_expression_allow_in()?))
                 } else {
                     Param::Ident(name)
                 };
@@ -2071,31 +2087,41 @@ impl Parser {
             Expression::ArrayLiteral(arr) => {
                 let mut elems = Vec::new();
                 for elem in &arr.elements {
-                    let (binding, default_init) = match elem {
-                        ArrayElement::Hole => (None, None),
-                        ArrayElement::Spread(_) => return None,
-                        ArrayElement::Expr(Expression::Identifier(ident)) => {
-                            (Some(ident.name.clone()), None)
+                    match elem {
+                        ArrayElement::Hole => elems.push(ArrayPatternElem {
+                            binding: None,
+                            default_init: None,
+                            rest: false,
+                        }),
+                        ArrayElement::Spread(expr) => {
+                            let binding = self.expression_to_for_in_of_pattern(expr)?;
+                            elems.push(ArrayPatternElem {
+                                binding: Some(binding),
+                                default_init: None,
+                                rest: true,
+                            });
                         }
                         ArrayElement::Expr(Expression::Assign(assign)) => {
-                            if let Expression::Identifier(ident) = assign.left.as_ref() {
-                                let mut default_init = *assign.right.clone();
-                                Self::assign_default_initializer_name(
-                                    &mut default_init,
-                                    &ident.name,
-                                );
-                                (Some(ident.name.clone()), Some(Box::new(default_init)))
-                            } else {
-                                return None;
+                            let binding = self.expression_to_for_in_of_pattern(assign.left.as_ref())?;
+                            let mut default_init = *assign.right.clone();
+                            for binding_name in binding.names() {
+                                Self::assign_default_initializer_name(&mut default_init, binding_name);
                             }
+                            elems.push(ArrayPatternElem {
+                                binding: Some(binding),
+                                default_init: Some(Box::new(default_init)),
+                                rest: false,
+                            });
                         }
-                        ArrayElement::Expr(_) => return None,
-                    };
-                    elems.push(ArrayPatternElem {
-                        binding,
-                        default_init,
-                        rest: false,
-                    });
+                        ArrayElement::Expr(expr) => {
+                            let binding = self.expression_to_for_in_of_pattern(expr)?;
+                            elems.push(ArrayPatternElem {
+                                binding: Some(binding),
+                                default_init: None,
+                                rest: false,
+                            });
+                        }
+                    }
                 }
                 Some(Binding::ArrayPattern(elems))
             }
@@ -2305,9 +2331,9 @@ impl Parser {
                     Some(TokenType::Spread)
                 ) {
                     self.advance();
-                    let (rest_name, _) = self.expect_binding_identifier()?;
+                    let (rest_binding, _) = self.parse_binding()?;
                     elems.push(ArrayPatternElem {
-                        binding: Some(rest_name),
+                        binding: Some(rest_binding),
                         default_init: None,
                         rest: true,
                     });
@@ -2320,9 +2346,11 @@ impl Parser {
                         | Some(TokenType::Yield)
                         | Some(TokenType::Async)
                         | Some(TokenType::Await)
+                        | Some(TokenType::LeftBrace)
+                        | Some(TokenType::LeftBracket)
                 ) {
-                    let (name, _) = self.expect_binding_identifier()?;
-                    Some(name)
+                    let (nested, _) = self.parse_binding()?;
+                    Some(nested)
                 } else {
                     return Err(ParseError {
                         code: ErrorCode::ParseExpectedIdentOrComma,
@@ -2332,8 +2360,10 @@ impl Parser {
                 };
                 let default_init = if self.optional(TokenType::Assign) {
                     let mut default_expr = self.parse_assignment_expression_allow_in()?;
-                    if let Some(binding_name) = binding.as_deref() {
-                        Self::assign_default_initializer_name(&mut default_expr, binding_name);
+                    if let Some(binding_target) = binding.as_ref() {
+                        for binding_name in binding_target.names() {
+                            Self::assign_default_initializer_name(&mut default_expr, binding_name);
+                        }
                     }
                     Some(Box::new(default_expr))
                 } else {
@@ -4988,8 +5018,14 @@ mod tests {
                     let d = &l.declarations[0];
                     if let crate::frontend::ast::Binding::ArrayPattern(elems) = &d.binding {
                         assert_eq!(elems.len(), 2);
-                        assert_eq!(elems[0].binding.as_deref(), Some("a"));
-                        assert_eq!(elems[1].binding.as_deref(), Some("b"));
+                        assert!(matches!(
+                            elems[0].binding,
+                            Some(crate::frontend::ast::Binding::Ident(ref name)) if name == "a"
+                        ));
+                        assert!(matches!(
+                            elems[1].binding,
+                            Some(crate::frontend::ast::Binding::Ident(ref name)) if name == "b"
+                        ));
                         return;
                     }
                 }

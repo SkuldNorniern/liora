@@ -6,7 +6,7 @@ pub fn promise_constructor(
     args: &[Value],
     ctx: &mut BuiltinContext,
 ) -> Result<Value, BuiltinError> {
-    let executor = args.first().cloned().unwrap_or(Value::Undefined);
+    let executor = args.get(1).cloned().unwrap_or(Value::Undefined);
 
     let promise_id = ctx.heap.alloc_promise(PromiseState::Pending);
 
@@ -47,7 +47,7 @@ pub fn promise_resolve_static(
     args: &[Value],
     ctx: &mut BuiltinContext,
 ) -> Result<Value, BuiltinError> {
-    let value = args.first().cloned().unwrap_or(Value::Undefined);
+    let value = args.get(1).cloned().unwrap_or(Value::Undefined);
     match value {
         Value::Promise(_) => Ok(value),
         other => {
@@ -62,7 +62,7 @@ pub fn promise_reject_static(
     args: &[Value],
     ctx: &mut BuiltinContext,
 ) -> Result<Value, BuiltinError> {
-    let reason = args.first().cloned().unwrap_or(Value::Undefined);
+    let reason = args.get(1).cloned().unwrap_or(Value::Undefined);
     let id = ctx.heap.alloc_promise(PromiseState::Rejected(reason));
     Ok(Value::Promise(id))
 }

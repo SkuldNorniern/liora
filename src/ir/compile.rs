@@ -1,10 +1,41 @@
 use crate::ir::bytecode::{BytecodeChunk, ConstEntry, ExceptionHandler, Opcode};
 use crate::ir::hir::*;
+use std::collections::HashMap;
 
 #[derive(Debug)]
 pub struct CompiledFunction {
     pub name: Option<String>,
     pub chunk: BytecodeChunk,
+}
+
+fn local_operand_size(slot: u32) -> usize {
+    if slot < 256 {
+        2
+    } else {
+        3
+    }
+}
+
+fn emit_load_local(code: &mut Vec<u8>, slot: u32) {
+    if slot < 256 {
+        code.push(Opcode::LoadLocal as u8);
+        code.push(slot as u8);
+    } else {
+        code.push(Opcode::LoadLocal16 as u8);
+        code.push((slot & 0xFF) as u8);
+        code.push((slot >> 8) as u8);
+    }
+}
+
+fn emit_store_local(code: &mut Vec<u8>, slot: u32) {
+    if slot < 256 {
+        code.push(Opcode::StoreLocal as u8);
+        code.push(slot as u8);
+    } else {
+        code.push(Opcode::StoreLocal16 as u8);
+        code.push((slot & 0xFF) as u8);
+        code.push((slot >> 8) as u8);
+    }
 }
 
 fn block_bytecode_size(block: &HirBlock, const_start: usize) -> usize {
@@ -18,7 +49,7 @@ fn block_bytecode_size(block: &HirBlock, const_start: usize) -> usize {
                 n
             }
             HirOp::Pop { .. } | HirOp::Dup { .. } | HirOp::Swap { .. } => 1,
-            HirOp::LoadLocal { .. } | HirOp::StoreLocal { .. } => 2,
+            HirOp::LoadLocal { id, .. } | HirOp::StoreLocal { id, .. } => local_operand_size(*id),
             HirOp::LoadThis { .. } => 1,
             HirOp::Add { .. }
             | HirOp::Sub { .. }
@@ -67,7 +98,9 @@ fn block_bytecode_size(block: &HirBlock, const_start: usize) -> usize {
     size += match &block.terminator {
         HirTerminator::Return { .. } | HirTerminator::Throw { .. } => 1,
         HirTerminator::Jump { .. } => 3,
-        HirTerminator::Branch { .. } | HirTerminator::BranchNullish { .. } => 2 + 3 + 3,
+        HirTerminator::Branch { cond, .. } | HirTerminator::BranchNullish { cond, .. } => {
+            local_operand_size(*cond) + 3 + 3
+        }
     };
     size
 }
@@ -143,14 +176,10 @@ pub fn hir_to_bytecode(func: &HirFunction) -> CompiledFunction {
                     code.push(Opcode::Swap as u8);
                 }
                 HirOp::LoadLocal { id, .. } => {
-                    let slot = (*id).min(255) as u8;
-                    code.push(Opcode::LoadLocal as u8);
-                    code.push(slot);
+                    emit_load_local(&mut code, *id);
                 }
                 HirOp::StoreLocal { id, .. } => {
-                    let slot = (*id).min(255) as u8;
-                    code.push(Opcode::StoreLocal as u8);
-                    code.push(slot);
+                    emit_store_local(&mut code, *id);
                 }
                 HirOp::LoadThis { .. } => {
                     code.push(Opcode::LoadThis as u8);
@@ -273,9 +302,7 @@ pub fn hir_to_bytecode(func: &HirFunction) -> CompiledFunction {
                 then_block,
                 else_block,
             } => {
-                let slot = (*cond).min(255) as u8;
-                code.push(Opcode::LoadLocal as u8);
-                code.push(slot);
+                emit_load_local(&mut code, *cond);
                 code.push(Opcode::JumpIfFalse as u8);
                 let else_offset = block_offsets
                     .get(*else_block as usize)
@@ -298,9 +325,7 @@ pub fn hir_to_bytecode(func: &HirFunction) -> CompiledFunction {
                 then_block,
                 else_block,
             } => {
-                let slot = (*cond).min(255) as u8;
-                code.push(Opcode::LoadLocal as u8);
-                code.push(slot);
+                emit_load_local(&mut code, *cond);
                 code.push(Opcode::JumpIfNullish as u8);
                 let then_offset = block_offsets
                     .get(*then_block as usize)
@@ -351,6 +376,7 @@ pub fn hir_to_bytecode(func: &HirFunction) -> CompiledFunction {
             constants,
             num_locals: func.num_locals,
             named_locals: func.named_locals.clone(),
+            mapped_arguments_slots: mapped_arguments_slots(func),
             captured_names: func.captured_names.clone(),
             rest_param_index: func.rest_param_index,
             handlers,
@@ -362,6 +388,21 @@ pub fn hir_to_bytecode(func: &HirFunction) -> CompiledFunction {
             is_async: func.is_async,
         },
     }
+}
+
+fn mapped_arguments_slots(func: &HirFunction) -> Vec<Option<u32>> {
+    if func.is_strict || !func.has_simple_parameter_list {
+        return Vec::new();
+    }
+    let slots_by_name: HashMap<&str, u32> = func
+        .named_locals
+        .iter()
+        .map(|(name, slot)| (name.as_str(), *slot))
+        .collect();
+    func.params
+        .iter()
+        .map(|param_name| slots_by_name.get(param_name.as_str()).copied())
+        .collect()
 }
 
 #[cfg(test)]
@@ -376,6 +417,8 @@ mod tests {
         let func = HirFunction {
             name: Some("main".to_string()),
             params: vec![],
+            is_strict: false,
+            has_simple_parameter_list: true,
             num_locals: 0,
             named_locals: vec![],
             captured_names: vec![],
@@ -398,5 +441,96 @@ mod tests {
         assert!(cf.chunk.code.len() >= 3);
         assert_eq!(cf.chunk.code[0], Opcode::PushConst as u8);
         assert_eq!(cf.chunk.code[cf.chunk.code.len() - 1], Opcode::Return as u8);
+    }
+
+    #[test]
+    fn compile_uses_local16_for_large_slot_ops() {
+        let span = crate::diagnostics::Span::point(Position::start());
+        let func = HirFunction {
+            name: Some("main".to_string()),
+            params: vec![],
+            is_strict: false,
+            has_simple_parameter_list: true,
+            num_locals: 300,
+            named_locals: vec![],
+            captured_names: vec![],
+            rest_param_index: None,
+            entry_block: 0,
+            blocks: vec![HirBlock {
+                id: 0,
+                ops: vec![
+                    HirOp::LoadConst {
+                        value: HirConst::Int(7),
+                        span,
+                    },
+                    HirOp::StoreLocal { id: 260, span },
+                    HirOp::LoadLocal { id: 260, span },
+                ],
+                terminator: HirTerminator::Return { span },
+            }],
+            exception_regions: vec![],
+            is_generator: false,
+            is_async: false,
+        };
+
+        let cf = hir_to_bytecode(&func);
+        assert_eq!(cf.chunk.code[0], Opcode::PushConst as u8);
+        assert_eq!(cf.chunk.code[2], Opcode::StoreLocal16 as u8);
+        assert_eq!(cf.chunk.code[3], 4);
+        assert_eq!(cf.chunk.code[4], 1);
+        assert_eq!(cf.chunk.code[5], Opcode::LoadLocal16 as u8);
+        assert_eq!(cf.chunk.code[6], 4);
+        assert_eq!(cf.chunk.code[7], 1);
+    }
+
+    #[test]
+    fn compile_branch_uses_local16_for_large_cond_slot() {
+        let span = crate::diagnostics::Span::point(Position::start());
+        let func = HirFunction {
+            name: Some("main".to_string()),
+            params: vec![],
+            is_strict: false,
+            has_simple_parameter_list: true,
+            num_locals: 350,
+            named_locals: vec![],
+            captured_names: vec![],
+            rest_param_index: None,
+            entry_block: 0,
+            blocks: vec![
+                HirBlock {
+                    id: 0,
+                    ops: vec![],
+                    terminator: HirTerminator::Branch {
+                        cond: 300,
+                        then_block: 1,
+                        else_block: 2,
+                    },
+                },
+                HirBlock {
+                    id: 1,
+                    ops: vec![HirOp::LoadConst {
+                        value: HirConst::Int(1),
+                        span,
+                    }],
+                    terminator: HirTerminator::Return { span },
+                },
+                HirBlock {
+                    id: 2,
+                    ops: vec![HirOp::LoadConst {
+                        value: HirConst::Int(0),
+                        span,
+                    }],
+                    terminator: HirTerminator::Return { span },
+                },
+            ],
+            exception_regions: vec![],
+            is_generator: false,
+            is_async: false,
+        };
+
+        let cf = hir_to_bytecode(&func);
+        assert_eq!(cf.chunk.code[0], Opcode::LoadLocal16 as u8);
+        assert_eq!(cf.chunk.code[1], 44);
+        assert_eq!(cf.chunk.code[2], 1);
     }
 }

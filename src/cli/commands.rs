@@ -242,10 +242,13 @@ fn format_binding(b: &ast::Binding) -> String {
             let parts: Vec<String> = elems
                 .iter()
                 .map(|e| {
-                    let mut base = e.binding.clone().unwrap_or_else(|| "".to_string());
+                    let mut base = e.binding.as_ref().map(format_binding).unwrap_or_default();
                     if let Some(init) = &e.default_init {
                         base.push_str(" = ");
                         base.push_str(&format_expr(init));
+                    }
+                    if e.rest {
+                        base = format!("...{}", base);
                     }
                     base
                 })

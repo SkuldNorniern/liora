@@ -16,6 +16,7 @@ mod function_proto;
 mod generator;
 mod host;
 mod html_comments;
+pub mod internal;
 mod iterator;
 mod json;
 mod map;
@@ -1043,6 +1044,36 @@ const BUILTINS: &[BuiltinDef] = &[
         name: "create",
         entry: BuiltinEntry::Normal(proxy::create),
     },
+    BuiltinDef {
+        category: "Proxy",
+        name: "isProxy",
+        entry: BuiltinEntry::Normal(proxy::is_proxy),
+    },
+    BuiltinDef {
+        category: "Proxy",
+        name: "has",
+        entry: BuiltinEntry::Throwing(proxy::has),
+    },
+    BuiltinDef {
+        category: "Proxy",
+        name: "get",
+        entry: BuiltinEntry::Throwing(proxy::get),
+    },
+    BuiltinDef {
+        category: "Proxy",
+        name: "set",
+        entry: BuiltinEntry::Throwing(proxy::set),
+    },
+    BuiltinDef {
+        category: "Proxy",
+        name: "getOwnPropertyDescriptor",
+        entry: BuiltinEntry::Throwing(proxy::get_own_property_descriptor),
+    },
+    BuiltinDef {
+        category: "Proxy",
+        name: "defineProperty",
+        entry: BuiltinEntry::Throwing(proxy::define_property),
+    },
     // Collection 0 (Map/Set .has shared)
     BuiltinDef {
         category: "Collection",
@@ -1300,6 +1331,11 @@ const BUILTINS: &[BuiltinDef] = &[
         category: "Reflect",
         name: "construct",
         entry: BuiltinEntry::Throwing(reflect::reflect_construct),
+    },
+    BuiltinDef {
+        category: "Reflect",
+        name: "getOwnPropertyDescriptor",
+        entry: BuiltinEntry::Throwing(reflect::reflect_get_own_property_descriptor),
     },
     BuiltinDef {
         category: "Reflect",

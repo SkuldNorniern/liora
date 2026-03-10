@@ -12,6 +12,8 @@ pub struct ExceptionRegion {
 pub struct HirFunction {
     pub name: Option<String>,
     pub params: Vec<String>,
+    pub is_strict: bool,
+    pub has_simple_parameter_list: bool,
     pub num_locals: u32,
     pub named_locals: Vec<(String, u32)>,
     pub captured_names: Vec<String>,
@@ -247,6 +249,8 @@ mod tests {
         let func = HirFunction {
             name: Some("main".to_string()),
             params: vec![],
+            is_strict: false,
+            has_simple_parameter_list: true,
             num_locals: 0,
             named_locals: vec![],
             captured_names: vec![],

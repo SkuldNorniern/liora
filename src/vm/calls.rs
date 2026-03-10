@@ -120,6 +120,7 @@ pub(crate) fn pop_args(stack: &mut Vec<Value>, argc: usize) -> Result<Vec<Value>
 pub(crate) fn setup_callee_locals(
     chunk: &BytecodeChunk,
     args: &[Value],
+    callee: Option<Value>,
     heap: &mut Heap,
 ) -> Vec<Value> {
     let mut locals = vec![Value::Undefined; chunk.num_locals as usize];
@@ -157,11 +158,8 @@ pub(crate) fn setup_callee_locals(
     if let Some(arguments_slot) = arguments_slot
         && arguments_slot < locals.len()
     {
-        let arguments_array_id = heap.alloc_array();
-        if !args.is_empty() {
-            heap.array_push_values(arguments_array_id, args);
-        }
-        locals[arguments_slot] = Value::Array(arguments_array_id);
+        let arguments_object_id = heap.alloc_arguments_object(args, callee);
+        locals[arguments_slot] = Value::Object(arguments_object_id);
     }
     locals
 }

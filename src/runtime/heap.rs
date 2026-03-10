@@ -1,6 +1,7 @@
 use super::Value;
 use crate::ir::bytecode::BytecodeChunk;
 use crate::runtime::builtins;
+use crate::runtime::builtins::internal;
 use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -162,7 +163,9 @@ impl Heap {
             Value::Builtin(b("Object", "propertyIsEnumerable")),
         );
         let obj_id = self.alloc_object();
+        self.set_prop(obj_proto_id, "constructor", Value::Object(obj_id));
         self.set_prop(obj_id, "prototype", Value::Object(obj_proto_id));
+        self.set_prop(obj_id, "__call__", Value::Builtin(b("Object", "create")));
         self.set_prop(obj_id, "create", Value::Builtin(b("Object", "create")));
         self.set_prop(obj_id, "keys", Value::Builtin(b("Object", "keys")));
         self.set_prop(obj_id, "values", Value::Builtin(b("Object", "values")));
@@ -951,6 +954,7 @@ impl Heap {
         let sym_iterator = self.alloc_symbol(Some("Symbol.iterator".to_string()));
         let sym_species = self.alloc_symbol(Some("Symbol.species".to_string()));
         let sym_to_string_tag = self.alloc_symbol(Some("Symbol.toStringTag".to_string()));
+        let sym_unscopables = self.alloc_symbol(Some("Symbol.unscopables".to_string()));
         let symbol_id = self.alloc_object();
         self.set_prop(symbol_id, "__call__", Value::Builtin(b("Symbol", "create")));
         self.set_prop(symbol_id, "for", Value::Builtin(b("Symbol", "for")));
@@ -962,6 +966,7 @@ impl Heap {
         self.set_prop(symbol_id, "iterator", Value::Symbol(sym_iterator));
         self.set_prop(symbol_id, "species", Value::Symbol(sym_species));
         self.set_prop(symbol_id, "toStringTag", Value::Symbol(sym_to_string_tag));
+        self.set_prop(symbol_id, "unscopables", Value::Symbol(sym_unscopables));
         self.set_prop(global_id, "Symbol", Value::Object(symbol_id));
 
         let console_id = self.alloc_object();
@@ -1085,6 +1090,11 @@ impl Heap {
             reflect_id,
             "defineProperty",
             Value::Builtin(b("Reflect", "defineProperty")),
+        );
+        self.set_prop(
+            reflect_id,
+            "getOwnPropertyDescriptor",
+            Value::Builtin(b("Reflect", "getOwnPropertyDescriptor")),
         );
         self.set_prop(reflect_id, "has", Value::Builtin(b("Reflect", "has")));
         self.set_prop(
@@ -1298,6 +1308,74 @@ impl Heap {
 
     pub fn alloc_object(&mut self) -> usize {
         self.alloc_object_with_prototype(None)
+    }
+
+    pub fn alloc_arguments_object(&mut self, args: &[Value], callee: Option<Value>) -> usize {
+        let prototype = match self.get_global("Object") {
+            Value::Object(object_constructor_id) => match self.get_prop(object_constructor_id, "prototype") {
+                Value::Object(object_prototype_id) => Some(object_prototype_id),
+                _ => None,
+            },
+            _ => None,
+        };
+        let arguments_object_id = self.alloc_object_with_prototype(prototype);
+        for (index, value) in args.iter().enumerate() {
+            self.set_prop(arguments_object_id, &index.to_string(), value.clone());
+        }
+        self.set_prop(
+            arguments_object_id,
+            internal::ARGUMENTS_LENGTH_PROPERTY,
+            Value::Int(args.len() as i32),
+        );
+        if let Some(callee_value) = callee {
+            self.set_prop(
+                arguments_object_id,
+                internal::ARGUMENTS_CALLEE_PROPERTY,
+                callee_value,
+            );
+        }
+        self.set_prop(
+            arguments_object_id,
+            internal::ARGUMENTS_OBJECT_MARKER,
+            Value::Bool(true),
+        );
+        arguments_object_id
+    }
+
+    pub fn alloc_proxy_object(&mut self, target: Value, handler: Value) -> usize {
+        let proxy_object_id = self.alloc_object();
+        self.set_prop(proxy_object_id, internal::PROXY_OBJECT_MARKER, Value::Bool(true));
+        self.set_prop(proxy_object_id, internal::PROXY_TARGET_VALUE, target);
+        self.set_prop(proxy_object_id, internal::PROXY_HANDLER_VALUE, handler);
+        proxy_object_id
+    }
+
+    pub fn is_proxy_object(&self, object_id: usize) -> bool {
+        internal::is_proxy_object(self, object_id)
+    }
+
+    pub fn proxy_target_value(&self, proxy_object_id: usize) -> Option<Value> {
+        if !self.is_proxy_object(proxy_object_id) {
+            return None;
+        }
+        let value = self.get_prop(proxy_object_id, internal::PROXY_TARGET_VALUE);
+        if matches!(value, Value::Undefined) {
+            None
+        } else {
+            Some(value)
+        }
+    }
+
+    pub fn proxy_handler_value(&self, proxy_object_id: usize) -> Option<Value> {
+        if !self.is_proxy_object(proxy_object_id) {
+            return None;
+        }
+        let value = self.get_prop(proxy_object_id, internal::PROXY_HANDLER_VALUE);
+        if matches!(value, Value::Undefined) {
+            None
+        } else {
+            Some(value)
+        }
     }
 
     pub fn alloc_regexp(&mut self) -> usize {
@@ -1658,6 +1736,21 @@ impl Heap {
             return self.object_has_property(proto_id, key);
         }
         false
+    }
+
+    pub fn array_has_own_property(&self, arr_id: usize, key: &str) -> bool {
+        if key == "length" {
+            return true;
+        }
+        if let Some(elements) = self.arrays.get(arr_id) {
+            if let Ok(idx) = key.parse::<usize>() {
+                return idx < elements.len();
+            }
+        }
+        self.array_props
+            .get(arr_id)
+            .map(|props| props.contains_key(key))
+            .unwrap_or(false)
     }
 
     pub fn delete_builtin_prop(&mut self, builtin_id: u8, key: &str) {

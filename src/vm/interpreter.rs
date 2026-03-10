@@ -132,6 +132,142 @@ fn dynamic_chunk_has_captures(heap: &Heap, dynamic_index: usize, chunk: &Bytecod
             .is_some_and(|captures| !captures.is_empty())
 }
 
+#[inline(always)]
+fn current_arguments_object_id(
+    state: &RunState<'_>,
+    chunk: &BytecodeChunk,
+    stack_base: usize,
+    num_locals: usize,
+) -> Option<usize> {
+    let arguments_slot = chunk.arguments_slot? as usize;
+    if arguments_slot >= num_locals {
+        return None;
+    }
+    match state.stack.get(stack_base + arguments_slot) {
+        Some(Value::Object(arguments_object_id)) => Some(*arguments_object_id),
+        _ => None,
+    }
+}
+
+#[inline(always)]
+fn mapped_argument_slot(chunk: &BytecodeChunk, argument_index: usize) -> Option<usize> {
+    chunk
+        .mapped_arguments_slots
+        .get(argument_index)
+        .and_then(|slot| *slot)
+        .map(|slot| slot as usize)
+}
+
+#[inline(always)]
+fn argument_index_from_key(key: &str) -> Option<usize> {
+    if key.is_empty() || !key.as_bytes().iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    key.parse::<usize>().ok()
+}
+
+#[inline(always)]
+fn sync_mapped_arguments_from_local(
+    state: &mut RunState<'_>,
+    chunk: &BytecodeChunk,
+    stack_base: usize,
+    num_locals: usize,
+    local_slot: usize,
+    local_value: &Value,
+    heap: &mut Heap,
+) {
+    let Some(arguments_object_id) =
+        current_arguments_object_id(state, chunk, stack_base, num_locals)
+    else {
+        return;
+    };
+    for (argument_index, mapped_slot) in chunk.mapped_arguments_slots.iter().enumerate() {
+        if mapped_slot.map(|slot| slot as usize) != Some(local_slot) {
+            continue;
+        }
+        let argument_key = argument_index.to_string();
+        if heap.object_has_own_property(arguments_object_id, &argument_key) {
+            heap.set_prop(arguments_object_id, &argument_key, local_value.clone());
+        }
+    }
+}
+
+#[inline(always)]
+fn sync_mapped_local_from_arguments(
+    state: &mut RunState<'_>,
+    chunk: &BytecodeChunk,
+    stack_base: usize,
+    num_locals: usize,
+    target_object_id: usize,
+    key: &str,
+    value: &Value,
+) {
+    let Some(arguments_object_id) =
+        current_arguments_object_id(state, chunk, stack_base, num_locals)
+    else {
+        return;
+    };
+    if target_object_id != arguments_object_id {
+        return;
+    }
+    let Some(argument_index) = argument_index_from_key(key) else {
+        return;
+    };
+    let Some(local_slot) = mapped_argument_slot(chunk, argument_index) else {
+        return;
+    };
+    state.set_local_at(stack_base, num_locals, local_slot, value.clone());
+}
+
+#[inline(always)]
+fn set_object_property_with_arguments_mapping(
+    state: &mut RunState<'_>,
+    chunk: &BytecodeChunk,
+    stack_base: usize,
+    num_locals: usize,
+    object_id: usize,
+    key: &str,
+    value: &Value,
+    invalidate_cache: bool,
+    heap: &mut Heap,
+) {
+    let had_own_property = heap.object_has_own_property(object_id, key);
+    if invalidate_cache {
+        state.getprop_cache.invalidate(object_id, false, key);
+    }
+    heap.set_prop(object_id, key, value.clone());
+    if had_own_property {
+        sync_mapped_local_from_arguments(
+            state, chunk, stack_base, num_locals, object_id, key, value,
+        );
+    }
+}
+
+#[inline(always)]
+fn setup_static_function_locals(
+    chunk: &BytecodeChunk,
+    args: &[Value],
+    function_index: usize,
+    heap: &mut Heap,
+) -> Vec<Value> {
+    setup_callee_locals(chunk, args, Some(Value::Function(function_index)), heap)
+}
+
+#[inline(always)]
+fn setup_dynamic_function_locals(
+    chunk: &BytecodeChunk,
+    args: &[Value],
+    dynamic_index: usize,
+    heap: &mut Heap,
+) -> Vec<Value> {
+    setup_callee_locals(
+        chunk,
+        args,
+        Some(Value::DynamicFunction(dynamic_index)),
+        heap,
+    )
+}
+
 const CHECK_INTERVAL_MASK: u32 = CHECK_INTERVAL - 1;
 
 pub fn interpret(chunk: &BytecodeChunk) -> Result<Completion, VmError> {
@@ -261,6 +397,41 @@ fn normalize_builtin_throw_value(heap: &mut Heap, thrown: Value) -> Value {
             }
         }
         other => other,
+    }
+}
+
+fn write_back_dynamic_captures_for_frame(state: &mut RunState<'_>, heap: &mut Heap, frame: &Frame) {
+    let Some(dynamic_function_id) = frame.dynamic_function_id else {
+        return;
+    };
+    if let Some(captures) = heap.dynamic_captures.get_mut(dynamic_function_id) {
+        for capture in captures.iter_mut() {
+            let inner_index = frame.stack_base + capture.inner_slot as usize;
+            let captured_value = state
+                .stack
+                .get(inner_index)
+                .cloned()
+                .unwrap_or(Value::Undefined);
+            capture.value = captured_value.clone();
+            if let (Some(outer_slot), Some(outer_frame_id)) = (capture.outer_slot, capture.outer_frame_id)
+            {
+                let outer_frame = state
+                    .frames
+                    .iter()
+                    .rev()
+                    .find(|outer| outer.id == outer_frame_id)
+                    .map(|outer| (outer.stack_base, outer.num_locals));
+                if let Some((outer_base, outer_locals)) = outer_frame {
+                    let outer_slot = outer_slot as usize;
+                    if outer_slot < outer_locals {
+                        let outer_index = outer_base + outer_slot;
+                        if let Some(slot) = state.stack.get_mut(outer_index) {
+                            *slot = captured_value.clone();
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -713,6 +884,20 @@ pub fn interpret_program_with_heap_and_entry(
                 };
                 state.stack.push(val);
             }
+            0x08 => {
+                let slot = read_u16(code, pc) as usize;
+                pc += 2;
+                let val = if slot < num_locals {
+                    state
+                        .stack
+                        .get(stack_base + slot)
+                        .cloned()
+                        .unwrap_or(Value::Undefined)
+                } else {
+                    Value::Undefined
+                };
+                state.stack.push(val);
+            }
             0x04 => {
                 let slot = read_u8(code, pc) as usize;
                 pc += 1;
@@ -720,7 +905,35 @@ pub fn interpret_program_with_heap_and_entry(
                 if slot < num_locals
                     && let Some(ptr) = state.stack.get_mut(stack_base + slot)
                 {
-                    *ptr = val;
+                    *ptr = val.clone();
+                    sync_mapped_arguments_from_local(
+                        &mut state,
+                        &chunk,
+                        stack_base,
+                        num_locals,
+                        slot,
+                        &val,
+                        heap,
+                    );
+                }
+            }
+            0x09 => {
+                let slot = read_u16(code, pc) as usize;
+                pc += 2;
+                let val = state.stack.pop().ok_or_else(underflow)?;
+                if slot < num_locals
+                    && let Some(ptr) = state.stack.get_mut(stack_base + slot)
+                {
+                    *ptr = val.clone();
+                    sync_mapped_arguments_from_local(
+                        &mut state,
+                        &chunk,
+                        stack_base,
+                        num_locals,
+                        slot,
+                        &val,
+                        heap,
+                    );
                 }
             }
             0x05 => {
@@ -974,39 +1187,8 @@ pub fn interpret_program_with_heap_and_entry(
                 } else {
                     Value::Undefined
                 };
-                if let Some(ref f) = popped
-                    && let Some(dynamic_function_id) = f.dynamic_function_id
-                {
-                    if let Some(captures) = heap.dynamic_captures.get_mut(dynamic_function_id) {
-                        for capture in captures.iter_mut() {
-                            let inner_index = f.stack_base + capture.inner_slot as usize;
-                            let captured_value = state
-                                .stack
-                                .get(inner_index)
-                                .cloned()
-                                .unwrap_or(Value::Undefined);
-                            capture.value = captured_value.clone();
-                            if let (Some(outer_slot), Some(outer_frame_id)) =
-                                (capture.outer_slot, capture.outer_frame_id)
-                            {
-                                let outer_frame = state
-                                    .frames
-                                    .iter()
-                                    .rev()
-                                    .find(|frame| frame.id == outer_frame_id)
-                                    .map(|frame| (frame.stack_base, frame.num_locals));
-                                if let Some((outer_base, outer_locals)) = outer_frame {
-                                    let outer_slot = outer_slot as usize;
-                                    if outer_slot < outer_locals {
-                                        let outer_index = outer_base + outer_slot;
-                                        if let Some(slot) = state.stack.get_mut(outer_index) {
-                                            *slot = captured_value.clone();
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
+                if let Some(ref f) = popped {
+                    write_back_dynamic_captures_for_frame(&mut state, heap, f);
                 }
                 if let Some(ref f) = popped
                     && f.is_dynamic
@@ -1062,47 +1244,12 @@ pub fn interpret_program_with_heap_and_entry(
             }
             0x21 => {
                 let val = state.stack.pop().ok_or_else(underflow)?;
-                let throw_pc = trace_pc;
-                if let Some((hpc, slot, is_fin)) = find_handler(&chunk, throw_pc) {
-                    state.throw_into_handler_slot(slot, val.clone(), is_fin, hpc);
-                    pc = hpc;
-                } else {
-                    let thrown_val = val;
-                    loop {
-                        let popped = state.frames.pop();
-                        if let Some(ref f) = popped {
-                            if f.is_dynamic {
-                                state.chunks_stack.pop();
-                            }
-                            state.stack.truncate(f.stack_base);
-                        }
-                        if popped.is_none() || state.frames.is_empty() {
-                            return Ok(Completion::Throw(thrown_val));
-                        }
-                        let caller_idx = state.frames.len() - 1;
-                        let (caller_chunk_idx, is_dyn, caller_pc, stack_base, num_locals) = {
-                            let f = &state.frames[caller_idx];
-                            (
-                                f.chunk_index,
-                                f.is_dynamic,
-                                f.pc,
-                                f.stack_base,
-                                f.num_locals,
-                            )
-                        };
-                        let caller_chunk =
-                            resolve_active_chunk(program, &state, caller_chunk_idx, is_dyn)?;
-                        if let Some((hpc, slot, is_fin)) =
-                            find_handler(caller_chunk.as_chunk(), caller_pc)
-                        {
-                            state.set_local_at(stack_base, num_locals, slot, thrown_val.clone());
-                            state.frames[caller_idx].rethrow_after_finally = is_fin;
-                            state.frames[caller_idx].pc = hpc;
-                            break;
-                        }
-                    }
-                    continue;
+                if let Some(completion) =
+                    propagate_call_throw(program, heap, &mut state, &chunk, trace_pc, val)?
+                {
+                    return Ok(completion);
                 }
+                continue;
             }
             0x22 => {
                 let slot = read_u8(code, pc) as usize;
@@ -1114,38 +1261,15 @@ pub fn interpret_program_with_heap_and_entry(
                         .get(stack_base + slot)
                         .cloned()
                         .unwrap_or(Value::Undefined);
-                    loop {
-                        let popped = state.frames.pop();
-                        if let Some(ref f) = popped {
-                            if f.is_dynamic {
-                                state.chunks_stack.pop();
-                            }
-                            state.stack.truncate(f.stack_base);
-                        }
-                        if popped.is_none() || state.frames.is_empty() {
-                            return Ok(Completion::Throw(thrown_val));
-                        }
-                        let caller_idx = state.frames.len() - 1;
-                        let (caller_chunk_idx, is_dyn, caller_pc, stack_base, num_locals) = {
-                            let f = &state.frames[caller_idx];
-                            (
-                                f.chunk_index,
-                                f.is_dynamic,
-                                f.pc,
-                                f.stack_base,
-                                f.num_locals,
-                            )
-                        };
-                        let caller_chunk =
-                            resolve_active_chunk(program, &state, caller_chunk_idx, is_dyn)?;
-                        if let Some((hpc, slot, is_fin)) =
-                            find_handler(caller_chunk.as_chunk(), caller_pc)
-                        {
-                            state.set_local_at(stack_base, num_locals, slot, thrown_val.clone());
-                            state.frames[caller_idx].rethrow_after_finally = is_fin;
-                            state.frames[caller_idx].pc = hpc;
-                            break;
-                        }
+                    if let Some(completion) = propagate_call_throw(
+                        program,
+                        heap,
+                        &mut state,
+                        &chunk,
+                        trace_pc,
+                        thrown_val,
+                    )? {
+                        return Ok(completion);
                     }
                     continue;
                 }
@@ -1209,7 +1333,7 @@ pub fn interpret_program_with_heap_and_entry(
                 }
 
                 let chunk_is_async = callee.is_async;
-                let callee_locals = setup_callee_locals(callee, &args, heap);
+                let callee_locals = setup_static_function_locals(callee, &args, func_idx, heap);
                 let num_locals = callee_locals.len();
                 let stack_base = state.stack.len();
                 state.stack.extend(callee_locals);
@@ -1263,7 +1387,7 @@ pub fn interpret_program_with_heap_and_entry(
                     Ok(BuiltinResult::Throw(v)) => {
                         let thrown = normalize_builtin_throw_value(heap, v);
                         if let Some(completion) =
-                            propagate_call_throw(program, &mut state, &chunk, call_pc, thrown)?
+                            propagate_call_throw(program, heap, &mut state, &chunk, call_pc, thrown)?
                         {
                             return Ok(completion);
                         }
@@ -1347,7 +1471,7 @@ pub fn interpret_program_with_heap_and_entry(
                             Ok(BuiltinResult::Throw(v)) => {
                                 let thrown = normalize_builtin_throw_value(heap, v);
                                 if let Some(completion) = propagate_call_throw(
-                                    program, &mut state, &chunk, call_pc, thrown,
+                                    program, heap, &mut state, &chunk, call_pc, thrown,
                                 )? {
                                     return Ok(completion);
                                 }
@@ -1397,7 +1521,8 @@ pub fn interpret_program_with_heap_and_entry(
                             continue;
                         }
                         let chunk_is_async = callee_chunk.is_async;
-                        let callee_locals = setup_callee_locals(&callee_chunk, &args, heap);
+                        let callee_locals =
+                            setup_dynamic_function_locals(&callee_chunk, &args, heap_idx, heap);
                         let num_locals = callee_locals.len();
                         let stack_base = state.stack.len();
                         let captured: Vec<DynamicCapture> = heap
@@ -1453,7 +1578,8 @@ pub fn interpret_program_with_heap_and_entry(
                         }
 
                         let chunk_is_async = callee_chunk.is_async;
-                        let callee_locals = setup_callee_locals(callee_chunk, &args, heap);
+                        let callee_locals =
+                            setup_static_function_locals(callee_chunk, &args, func_idx, heap);
                         let callee_stack_base = state.stack.len();
                         state.stack.extend(callee_locals);
                         let frame_id = state.allocate_frame_id();
@@ -1516,7 +1642,7 @@ pub fn interpret_program_with_heap_and_entry(
                             Ok(BuiltinResult::Throw(v)) => {
                                 let thrown = normalize_builtin_throw_value(heap, v);
                                 if let Some(completion) = propagate_call_throw(
-                                    program, &mut state, &chunk, call_pc, thrown,
+                                    program, heap, &mut state, &chunk, call_pc, thrown,
                                 )? {
                                     return Ok(completion);
                                 }
@@ -1561,7 +1687,7 @@ pub fn interpret_program_with_heap_and_entry(
                                 Ok(BuiltinResult::Throw(v)) => {
                                     let thrown = normalize_builtin_throw_value(heap, v);
                                     if let Some(completion) = propagate_call_throw(
-                                        program, &mut state, &chunk, call_pc, thrown,
+                                        program, heap, &mut state, &chunk, call_pc, thrown,
                                     )? {
                                         return Ok(completion);
                                     }
@@ -1598,7 +1724,7 @@ pub fn interpret_program_with_heap_and_entry(
                                 "callee is not a function (got object)".to_string(),
                             );
                             if let Some(completion) =
-                                propagate_call_throw(program, &mut state, &chunk, call_pc, thrown)?
+                                propagate_call_throw(program, heap, &mut state, &chunk, call_pc, thrown)?
                             {
                                 return Ok(completion);
                             }
@@ -1612,7 +1738,7 @@ pub fn interpret_program_with_heap_and_entry(
                             format!("callee is not a function (got {})", callee.type_name_for_error(),),
                         );
                         if let Some(completion) =
-                            propagate_call_throw(program, &mut state, &chunk, call_pc, thrown)?
+                            propagate_call_throw(program, heap, &mut state, &chunk, call_pc, thrown)?
                         {
                             return Ok(completion);
                         }
@@ -1633,7 +1759,7 @@ pub fn interpret_program_with_heap_and_entry(
                 let prototype_id = heap.ensure_function_prototype(func_idx);
                 let obj_id = heap.alloc_object_with_prototype(Some(prototype_id));
                 let args = pop_args(&mut state.stack, argc)?;
-                let callee_locals = setup_callee_locals(callee, &args, heap);
+                let callee_locals = setup_static_function_locals(callee, &args, func_idx, heap);
                 let stack_base = state.stack.len();
                 state.stack.extend(callee_locals);
                 let frame_id = state.allocate_frame_id();
@@ -1686,7 +1812,7 @@ pub fn interpret_program_with_heap_and_entry(
                             Ok(BuiltinResult::Throw(v)) => {
                                 let thrown = normalize_builtin_throw_value(heap, v);
                                 if let Some(completion) = propagate_call_throw(
-                                    program, &mut state, &chunk, trace_pc, thrown,
+                                    program, heap, &mut state, &chunk, trace_pc, thrown,
                                 )? {
                                     return Ok(completion);
                                 }
@@ -1721,7 +1847,8 @@ pub fn interpret_program_with_heap_and_entry(
                             .get(heap_idx)
                             .ok_or(VmError::InvalidConstIndex(heap_idx))?
                             .clone();
-                        let callee_locals = setup_callee_locals(&callee_chunk, &args, heap);
+                        let callee_locals =
+                            setup_dynamic_function_locals(&callee_chunk, &args, heap_idx, heap);
                         let num_locals = callee_locals.len();
                         let stack_base = state.stack.len();
                         let captured: Vec<DynamicCapture> = heap
@@ -1760,7 +1887,8 @@ pub fn interpret_program_with_heap_and_entry(
                             .chunks
                             .get(func_idx)
                             .ok_or(VmError::InvalidConstIndex(func_idx))?;
-                        let callee_locals = setup_callee_locals(callee_chunk, &args, heap);
+                        let callee_locals =
+                            setup_static_function_locals(callee_chunk, &args, func_idx, heap);
                         let stack_base = state.stack.len();
                         state.stack.extend(callee_locals);
                         let frame_id = state.allocate_frame_id();
@@ -1825,7 +1953,7 @@ pub fn interpret_program_with_heap_and_entry(
                                 Ok(BuiltinResult::Throw(v)) => {
                                     let thrown = normalize_builtin_throw_value(heap, v);
                                     if let Some(completion) = propagate_call_throw(
-                                        program, &mut state, &chunk, trace_pc, thrown,
+                                        program, heap, &mut state, &chunk, trace_pc, thrown,
                                     )? {
                                         return Ok(completion);
                                     }
@@ -1862,7 +1990,7 @@ pub fn interpret_program_with_heap_and_entry(
                                 "callee is not a function (got object)".to_string(),
                             );
                             if let Some(completion) =
-                                propagate_call_throw(program, &mut state, &chunk, trace_pc, thrown)?
+                                propagate_call_throw(program, heap, &mut state, &chunk, trace_pc, thrown)?
                             {
                                 return Ok(completion);
                             }
@@ -1876,7 +2004,7 @@ pub fn interpret_program_with_heap_and_entry(
                             format!("callee is not a function (got {})", callee.type_name_for_error(),),
                         );
                         if let Some(completion) =
-                            propagate_call_throw(program, &mut state, &chunk, trace_pc, thrown)?
+                            propagate_call_throw(program, heap, &mut state, &chunk, trace_pc, thrown)?
                         {
                             return Ok(completion);
                         }
@@ -1911,7 +2039,7 @@ pub fn interpret_program_with_heap_and_entry(
                         format!("Cannot read properties of {}", obj),
                     );
                     if let Some(completion) =
-                        propagate_call_throw(program, &mut state, &chunk, trace_pc, thrown)?
+                        propagate_call_throw(program, heap, &mut state, &chunk, trace_pc, thrown)?
                     {
                         return Ok(completion);
                     }
@@ -1935,8 +2063,17 @@ pub fn interpret_program_with_heap_and_entry(
                 };
                 match &obj {
                     Value::Object(id) => {
-                        state.getprop_cache.invalidate(*id, false, &key_str);
-                        heap.set_prop(*id, &key_str, value.clone());
+                        set_object_property_with_arguments_mapping(
+                            &mut state,
+                            &chunk,
+                            stack_base,
+                            num_locals,
+                            *id,
+                            &key_str,
+                            &value,
+                            true,
+                            heap,
+                        );
                     }
                     Value::Array(id) => {
                         state.getprop_cache.invalidate(*id, true, &key_str);
@@ -1962,7 +2099,7 @@ pub fn interpret_program_with_heap_and_entry(
                         format!("Cannot read properties of {}", obj),
                     );
                     if let Some(completion) =
-                        propagate_call_throw(program, &mut state, &chunk, trace_pc, thrown)?
+                        propagate_call_throw(program, heap, &mut state, &chunk, trace_pc, thrown)?
                     {
                         return Ok(completion);
                     }
@@ -1977,7 +2114,19 @@ pub fn interpret_program_with_heap_and_entry(
                 let obj = state.stack.pop().ok_or_else(underflow)?;
                 let key_str = value_to_prop_key_with_heap(&key, heap);
                 match &obj {
-                    Value::Object(id) => heap.set_prop(*id, &key_str, value.clone()),
+                    Value::Object(id) => {
+                        set_object_property_with_arguments_mapping(
+                            &mut state,
+                            &chunk,
+                            stack_base,
+                            num_locals,
+                            *id,
+                            &key_str,
+                            &value,
+                            false,
+                            heap,
+                        );
+                    }
                     Value::Array(id) => heap.set_array_prop(*id, &key_str, value.clone()),
                     Value::Map(id) => heap.map_set(*id, &key_str, value.clone()),
                     Value::Function(i) => heap.set_function_prop(*i, &key_str, value.clone()),
@@ -2004,7 +2153,7 @@ pub fn interpret_program_with_heap_and_entry(
                         format!("Cannot read properties of {}", obj),
                     );
                     if let Some(completion) =
-                        propagate_call_throw(program, &mut state, &chunk, trace_pc, thrown)?
+                        propagate_call_throw(program, heap, &mut state, &chunk, trace_pc, thrown)?
                     {
                         return Ok(completion);
                     }
@@ -2028,8 +2177,17 @@ pub fn interpret_program_with_heap_and_entry(
                 };
                 match &obj {
                     Value::Object(id) => {
-                        state.getprop_cache.invalidate(*id, false, &key_str);
-                        heap.set_prop(*id, &key_str, value.clone());
+                        set_object_property_with_arguments_mapping(
+                            &mut state,
+                            &chunk,
+                            stack_base,
+                            num_locals,
+                            *id,
+                            &key_str,
+                            &value,
+                            true,
+                            heap,
+                        );
                     }
                     Value::Array(id) => {
                         state.getprop_cache.invalidate(*id, true, &key_str);
@@ -2183,6 +2341,7 @@ pub fn interpret_program_with_heap_and_entry(
 
 fn propagate_call_throw(
     program: &Program,
+    heap: &mut Heap,
     state: &mut RunState,
     current_chunk: &BytecodeChunk,
     throw_pc: usize,
@@ -2197,10 +2356,21 @@ fn propagate_call_throw(
     loop {
         let popped_frame = state.frames.pop();
         if let Some(frame) = popped_frame.as_ref() {
+            write_back_dynamic_captures_for_frame(state, heap, frame);
             if frame.is_dynamic {
                 state.chunks_stack.pop();
             }
             state.stack.truncate(frame.stack_base);
+            if frame.is_async {
+                let rejected_promise_id =
+                    heap.alloc_promise(crate::runtime::PromiseState::Rejected(uncaught_value.clone()));
+                let rejected_promise = Value::Promise(rejected_promise_id);
+                if state.frames.is_empty() {
+                    return Ok(Some(Completion::Return(rejected_promise)));
+                }
+                state.stack.push(rejected_promise);
+                return Ok(None);
+            }
         }
 
         if popped_frame.is_none() || state.frames.is_empty() {
@@ -2275,7 +2445,7 @@ fn handle_apply_invoke(
                     Ok(BuiltinResult::Throw(v)) => {
                         let thrown = normalize_builtin_throw_value(heap, v);
                         if let Some(completion) =
-                            propagate_call_throw(program, state, current_chunk, call_pc, thrown)?
+                            propagate_call_throw(program, heap, state, current_chunk, call_pc, thrown)?
                         {
                             return Ok(Some(completion));
                         }
@@ -2327,7 +2497,8 @@ fn handle_apply_invoke(
                     return Ok(None);
                 }
                 let chunk_is_async = callee_chunk.is_async;
-                let callee_locals = setup_callee_locals(&callee_chunk, &args, heap);
+                let callee_locals =
+                    setup_dynamic_function_locals(&callee_chunk, &args, *heap_idx, heap);
                 let num_locals = callee_locals.len();
                 let stack_base = state.stack.len();
                 let captured: Vec<DynamicCapture> = heap
@@ -2390,7 +2561,8 @@ fn handle_apply_invoke(
                 }
 
                 let chunk_is_async = callee_chunk.is_async;
-                let callee_locals = setup_callee_locals(callee_chunk, &args, heap);
+                let callee_locals =
+                    setup_static_function_locals(callee_chunk, &args, *func_idx, heap);
                 let stack_base = state.stack.len();
                 state.stack.extend(callee_locals);
                 let frame_id = state.allocate_frame_id();
@@ -2433,7 +2605,7 @@ fn handle_apply_invoke(
                     Ok(BuiltinResult::Throw(v)) => {
                         let thrown = normalize_builtin_throw_value(heap, v);
                         if let Some(completion) =
-                            propagate_call_throw(program, state, current_chunk, call_pc, thrown)?
+                            propagate_call_throw(program, heap, state, current_chunk, call_pc, thrown)?
                         {
                             return Ok(Some(completion));
                         }
@@ -2474,6 +2646,7 @@ fn handle_apply_invoke(
                             let thrown = normalize_builtin_throw_value(heap, v);
                             if let Some(completion) = propagate_call_throw(
                                 program,
+                                heap,
                                 state,
                                 current_chunk,
                                 call_pc,
@@ -2510,7 +2683,7 @@ fn handle_apply_invoke(
                         "callee is not a function (got object)".to_string(),
                     );
                     if let Some(completion) =
-                        propagate_call_throw(program, state, current_chunk, call_pc, thrown)?
+                        propagate_call_throw(program, heap, state, current_chunk, call_pc, thrown)?
                     {
                         return Ok(Some(completion));
                     }
@@ -2524,7 +2697,7 @@ fn handle_apply_invoke(
                     format!("callee is not a function (got {})", callee.type_name_for_error(),),
                 );
                 if let Some(completion) =
-                    propagate_call_throw(program, state, current_chunk, call_pc, thrown)?
+                    propagate_call_throw(program, heap, state, current_chunk, call_pc, thrown)?
                 {
                     return Ok(Some(completion));
                 }
@@ -2541,7 +2714,7 @@ fn create_generator_state_static(
     args: &[Value],
     this_value: Value,
 ) -> usize {
-    let locals = super::calls::setup_callee_locals(chunk, args, heap);
+    let locals = setup_static_function_locals(chunk, args, func_idx, heap);
     let gs = crate::runtime::GeneratorState {
         chunk: chunk.clone(),
         is_dynamic: false,
@@ -2563,7 +2736,7 @@ fn create_generator_state(
     args: &[Value],
     this_value: Value,
 ) -> usize {
-    let mut locals = super::calls::setup_callee_locals(chunk, args, heap);
+    let mut locals = setup_dynamic_function_locals(chunk, args, dyn_index, heap);
     let captured: Vec<DynamicCapture> = heap
         .dynamic_captures
         .get(dyn_index)
@@ -2692,6 +2865,7 @@ mod tests {
             constants: vec![ConstEntry::Int(42)],
             num_locals: 0,
             named_locals: vec![],
+            mapped_arguments_slots: vec![],
             captured_names: vec![],
             rest_param_index: None,
             handlers: vec![],
@@ -2720,6 +2894,7 @@ mod tests {
             constants: vec![ConstEntry::Int(1), ConstEntry::Int(2)],
             num_locals: 0,
             named_locals: vec![],
+            mapped_arguments_slots: vec![],
             captured_names: vec![],
             rest_param_index: None,
             handlers: vec![],
@@ -2770,6 +2945,7 @@ mod tests {
             constants: vec![ConstEntry::Int(42), ConstEntry::String("x".to_string())],
             num_locals: 0,
             named_locals: vec![],
+            mapped_arguments_slots: vec![],
             captured_names: vec![],
             rest_param_index: None,
             handlers: vec![],
@@ -2812,6 +2988,7 @@ mod tests {
             ],
             num_locals: 1,
             named_locals: vec![],
+            mapped_arguments_slots: vec![],
             captured_names: vec![],
             rest_param_index: None,
             handlers: vec![],
@@ -2826,6 +3003,39 @@ mod tests {
                 42,
                 "StoreLocal/LoadLocal + SetProp should mutate"
             );
+        } else {
+            panic!("expected Return(42), got {:?}", result);
+        }
+    }
+
+    #[test]
+    fn interpret_load_store_local16() {
+        let chunk = BytecodeChunk {
+            code: vec![
+                Opcode::PushConst as u8,
+                0,
+                Opcode::StoreLocal16 as u8,
+                4,
+                1,
+                Opcode::LoadLocal16 as u8,
+                4,
+                1,
+                Opcode::Return as u8,
+            ],
+            constants: vec![ConstEntry::Int(42)],
+            num_locals: 300,
+            named_locals: vec![],
+            mapped_arguments_slots: vec![],
+            captured_names: vec![],
+            rest_param_index: None,
+            handlers: vec![],
+            arguments_slot: None,
+            is_generator: false,
+            is_async: false,
+        };
+        let result = interpret(&chunk).expect("interpret");
+        if let Completion::Return(v) = result {
+            assert_eq!(v.to_i64(), 42);
         } else {
             panic!("expected Return(42), got {:?}", result);
         }
@@ -2863,6 +3073,7 @@ mod tests {
             ],
             num_locals: 0,
             named_locals: vec![],
+            mapped_arguments_slots: vec![],
             captured_names: vec![],
             rest_param_index: None,
             handlers: vec![],
