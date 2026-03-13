@@ -76,6 +76,7 @@ pub struct ClassMember {
 #[derive(Debug, Clone)]
 pub enum ClassMemberKey {
     Ident(String),
+    PrivateIdent(String),
     Computed(Box<Expression>),
 }
 
@@ -412,12 +413,19 @@ pub enum Expression {
     ClassExpr(ClassExprData),
     LogicalAssign(LogicalAssignExpr),
     Super(SuperExpr),
+    NewTarget(NewTargetExpr),
     Yield(YieldExpr),
     Await(AwaitExpr),
 }
 
 #[derive(Debug, Clone)]
 pub struct SuperExpr {
+    pub id: NodeId,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone)]
+pub struct NewTargetExpr {
     pub id: NodeId,
     pub span: Span,
 }
@@ -744,6 +752,7 @@ impl Expression {
             Expression::ClassExpr(e) => e.span,
             Expression::LogicalAssign(e) => e.span,
             Expression::Super(e) => e.span,
+            Expression::NewTarget(e) => e.span,
             Expression::Yield(e) => e.span,
             Expression::Await(e) => e.span,
         }

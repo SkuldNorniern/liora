@@ -1,8 +1,8 @@
 //! test262 $262 host object stubs. Minimal implementation for harness-dependent tests.
 
 use super::BuiltinContext;
-use crate::runtime::builtins;
 use crate::runtime::Value;
+use crate::runtime::builtins;
 
 pub fn create_realm(
     _args: &[Value],

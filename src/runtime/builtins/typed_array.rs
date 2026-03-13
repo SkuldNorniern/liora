@@ -6,11 +6,7 @@ use crate::runtime::{Heap, Value};
 const BYTES_PER_ELEMENT: usize = 8;
 
 fn constructor_args(args: &[Value]) -> &[Value] {
-    if args.len() >= 2 {
-        &args[1..]
-    } else {
-        args
-    }
+    if args.len() >= 2 { &args[1..] } else { args }
 }
 
 fn to_non_negative_usize(value: &Value) -> usize {

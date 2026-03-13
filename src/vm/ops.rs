@@ -87,7 +87,9 @@ pub(crate) fn strict_eq(a: &Value, b: &Value) -> bool {
         (Value::Int(x), Value::Number(y)) => !y.is_nan() && (*x as f64) == *y,
         (Value::Number(x), Value::Int(y)) => !x.is_nan() && *x == (*y as f64),
         (Value::Number(x), Value::Number(y)) => !x.is_nan() && !y.is_nan() && x == y,
-        (Value::BigInt(x), Value::BigInt(y)) => normalize_bigint_decimal(x) == normalize_bigint_decimal(y),
+        (Value::BigInt(x), Value::BigInt(y)) => {
+            normalize_bigint_decimal(x) == normalize_bigint_decimal(y)
+        }
         (Value::String(x), Value::String(y)) => x == y,
         (Value::Symbol(x), Value::Symbol(y)) => x == y,
         (Value::Object(x), Value::Object(y)) => x == y,
@@ -328,6 +330,12 @@ pub(crate) fn instanceof_check(value: &Value, constructor: &Value, heap: &Heap) 
         (Value::Map(_), Some("Map")) => true,
         (Value::Set(_), Some("Set")) => true,
         (Value::Date(_), Some("Date")) => true,
+        (Value::Promise(_), Some("Promise")) => true,
+        (Value::Function(_), Some("Function")) => true,
+        (Value::DynamicFunction(_), Some("Function")) => true,
+        (Value::Builtin(_), Some("Function")) => true,
+        (Value::BoundBuiltin(_, _, _), Some("Function")) => true,
+        (Value::BoundFunction(_, _, _), Some("Function")) => true,
         (Value::Object(id), Some("Error")) => heap.is_error_object(*id),
         (Value::Object(id), Some("ReferenceError")) => {
             heap.is_error_object(*id)
@@ -417,12 +425,31 @@ pub(crate) fn in_check(key: &Value, obj: &Value, heap: &Heap) -> Result<bool, St
 }
 
 fn get_constructor_name(constructor: &Value, heap: &Heap) -> Option<String> {
+    let global = heap.global_object();
+    for name in [
+        "Array",
+        "Object",
+        "Error",
+        "ReferenceError",
+        "TypeError",
+        "RangeError",
+        "SyntaxError",
+        "URIError",
+        "Map",
+        "Set",
+        "Date",
+        "Promise",
+        "Function",
+    ] {
+        if heap.get_prop(global, name) == *constructor {
+            return Some(name.to_string());
+        }
+    }
     match constructor {
         Value::Object(id) => {
             if let Value::String(name) = heap.get_prop(*id, "name") {
                 return Some(name);
             }
-            let global = heap.global_object();
             for name in [
                 "Array",
                 "Object",
@@ -435,6 +462,8 @@ fn get_constructor_name(constructor: &Value, heap: &Heap) -> Option<String> {
                 "Map",
                 "Set",
                 "Date",
+                "Promise",
+                "Function",
             ] {
                 if let Value::Object(gid) = heap.get_prop(global, name)
                     && gid == *id

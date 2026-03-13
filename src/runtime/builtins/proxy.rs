@@ -173,7 +173,9 @@ pub fn get_own_property_descriptor(
     if let Some((proxy_target, proxy_handler)) = proxy_parts(&target, ctx.heap)
         && let Value::Object(handler_object_id) = proxy_handler.clone()
     {
-        let trap = ctx.heap.get_prop(handler_object_id, "getOwnPropertyDescriptor");
+        let trap = ctx
+            .heap
+            .get_prop(handler_object_id, "getOwnPropertyDescriptor");
         if is_callable(&trap) {
             return Err(BuiltinError::Invoke {
                 callee: trap,

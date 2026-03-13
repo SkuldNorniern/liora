@@ -1,9 +1,9 @@
 //! eval(x) - Execute code string in global scope. Minimal implementation for test262.
 use super::BuiltinContext;
-use crate::frontend::{check_early_errors, Parser};
+use crate::frontend::{Parser, check_early_errors};
 use crate::ir::{hir_to_bytecode, script_to_hir};
 use crate::runtime::Value;
-use crate::vm::{interpret_program_with_heap, Completion, Program};
+use crate::vm::{Completion, Program, interpret_program_with_heap};
 
 pub fn eval(args: &[Value], ctx: &mut BuiltinContext) -> Result<Value, super::BuiltinError> {
     let code = match args.first() {

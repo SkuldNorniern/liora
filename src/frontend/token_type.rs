@@ -118,6 +118,7 @@ pub enum TokenType {
     LeftBrace,
     RightBrace,
     Dot,
+    Hash,
     Spread,
     Arrow,
     OptionalChaining,

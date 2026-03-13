@@ -1,9 +1,10 @@
 #[cfg(test)]
 use crate::ir::bytecode::Opcode;
 use crate::ir::bytecode::{BytecodeChunk, ConstEntry};
+use crate::runtime::DynamicCapture;
 use crate::runtime::builtins;
-use crate::runtime::heap::DynamicCapture;
 use crate::runtime::{Heap, Value};
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -11,7 +12,7 @@ use super::calls::{execute_builtin, pop_args, read_i16, read_u8, read_u16, setup
 use super::ops::{
     add_values, div_values, gt_values, gte_values, in_check, instanceof_check, is_nullish,
     is_truthy, loose_eq, lt_values, lte_values, mod_values, mul_values, pow_values, strict_eq,
-    sub_values, value_to_prop_key, value_to_prop_key_with_heap,
+    sub_values, value_to_prop_key_with_heap,
 };
 use super::props::{GetPropCache, resolve_get_prop};
 use super::tiering::{JitTiering, JitTieringStats};
@@ -44,6 +45,7 @@ struct RunState<'a> {
     getprop_cache: GetPropCache,
     tiering: JitTiering,
     next_frame_id: usize,
+    promise_chain_targets: HashMap<usize, usize>,
     jit_report: Option<&'a mut JitTieringStats>,
 }
 
@@ -230,7 +232,20 @@ fn set_object_property_with_arguments_mapping(
     value: &Value,
     invalidate_cache: bool,
     heap: &mut Heap,
-) {
+) -> Option<Value> {
+    if key == "Symbol.toStringTag"
+        && let Value::Object(iterator_constructor_id) = heap.get_global("Iterator")
+        && let Value::Object(iterator_prototype_id) =
+            heap.get_prop(iterator_constructor_id, "prototype")
+        && object_id == iterator_prototype_id
+    {
+        return Some(create_native_error(
+            heap,
+            "TypeError",
+            "Cannot assign to Iterator.prototype[Symbol.toStringTag]".to_string(),
+        ));
+    }
+
     let had_own_property = heap.object_has_own_property(object_id, key);
     if invalidate_cache {
         state.getprop_cache.invalidate(object_id, false, key);
@@ -241,6 +256,7 @@ fn set_object_property_with_arguments_mapping(
             state, chunk, stack_base, num_locals, object_id, key, value,
         );
     }
+    None
 }
 
 #[inline(always)]
@@ -269,6 +285,7 @@ fn setup_dynamic_function_locals(
 }
 
 const CHECK_INTERVAL_MASK: u32 = CHECK_INTERVAL - 1;
+const PROMISE_CHAIN_SENTINEL: usize = usize::MAX;
 
 pub fn interpret(chunk: &BytecodeChunk) -> Result<Completion, VmError> {
     let program = Program {
@@ -413,7 +430,8 @@ fn write_back_dynamic_captures_for_frame(state: &mut RunState<'_>, heap: &mut He
                 .cloned()
                 .unwrap_or(Value::Undefined);
             capture.value = captured_value.clone();
-            if let (Some(outer_slot), Some(outer_frame_id)) = (capture.outer_slot, capture.outer_frame_id)
+            if let (Some(outer_slot), Some(outer_frame_id)) =
+                (capture.outer_slot, capture.outer_frame_id)
             {
                 let outer_frame = state
                     .frames
@@ -650,6 +668,7 @@ pub fn interpret_program_with_heap_and_entry(
             enable_jit && !trace && cancel.is_none(),
         ),
         next_frame_id: 1,
+        promise_chain_targets: HashMap::new(),
         jit_report,
     };
 
@@ -749,10 +768,8 @@ pub fn interpret_program_with_heap_and_entry(
                             let outer_frame_id = state.frames.get(frame_idx).map(|frame| frame.id);
                             let mut captured_slots: Vec<DynamicCapture> = Vec::new();
                             for capture_name in &callee_chunk.captured_names {
-                                let outer_slot = chunk
-                                    .named_locals
-                                    .iter()
-                                    .find_map(|(name, slot)| {
+                                let outer_slot =
+                                    chunk.named_locals.iter().find_map(|(name, slot)| {
                                         (name == capture_name).then_some(*slot)
                                     });
                                 let inner_slot =
@@ -816,10 +833,8 @@ pub fn interpret_program_with_heap_and_entry(
                             let outer_frame_id = state.frames.get(frame_idx).map(|frame| frame.id);
                             let mut captured_slots: Vec<DynamicCapture> = Vec::new();
                             for capture_name in &callee_chunk.captured_names {
-                                let outer_slot = chunk
-                                    .named_locals
-                                    .iter()
-                                    .find_map(|(name, slot)| {
+                                let outer_slot =
+                                    chunk.named_locals.iter().find_map(|(name, slot)| {
                                         (name == capture_name).then_some(*slot)
                                     });
                                 let inner_slot =
@@ -907,13 +922,7 @@ pub fn interpret_program_with_heap_and_entry(
                 {
                     *ptr = val.clone();
                     sync_mapped_arguments_from_local(
-                        &mut state,
-                        &chunk,
-                        stack_base,
-                        num_locals,
-                        slot,
-                        &val,
-                        heap,
+                        &mut state, &chunk, stack_base, num_locals, slot, &val, heap,
                     );
                 }
             }
@@ -926,13 +935,7 @@ pub fn interpret_program_with_heap_and_entry(
                 {
                     *ptr = val.clone();
                     sync_mapped_arguments_from_local(
-                        &mut state,
-                        &chunk,
-                        stack_base,
-                        num_locals,
-                        slot,
-                        &val,
-                        heap,
+                        &mut state, &chunk, stack_base, num_locals, slot, &val, heap,
                     );
                 }
             }
@@ -1087,19 +1090,26 @@ pub fn interpret_program_with_heap_and_entry(
             0x1e => {
                 let rhs = state.stack.pop().ok_or_else(underflow)?;
                 let lhs = state.stack.pop().ok_or_else(underflow)?;
-                state.stack.push(Value::Int(lhs.to_i32() << rhs.to_i32()));
+                let shift = (rhs.to_i32() as u32) & 0x1f;
+                state
+                    .stack
+                    .push(Value::Int(lhs.to_i32().wrapping_shl(shift)));
             }
             0x1f => {
                 let rhs = state.stack.pop().ok_or_else(underflow)?;
                 let lhs = state.stack.pop().ok_or_else(underflow)?;
-                state.stack.push(Value::Int(lhs.to_i32() >> rhs.to_i32()));
+                let shift = (rhs.to_i32() as u32) & 0x1f;
+                state
+                    .stack
+                    .push(Value::Int(lhs.to_i32().wrapping_shr(shift)));
             }
             0x23 => {
                 let rhs = state.stack.pop().ok_or_else(underflow)?;
                 let lhs = state.stack.pop().ok_or_else(underflow)?;
-                state.stack.push(Value::Int(
-                    (lhs.to_i32() as u32 >> rhs.to_i32() as u32) as i32,
-                ));
+                let shift = (rhs.to_i32() as u32) & 0x1f;
+                state
+                    .stack
+                    .push(Value::Int((lhs.to_i32() as u32).wrapping_shr(shift) as i32));
             }
             0x24 => {
                 let rhs = state.stack.pop().ok_or_else(underflow)?;
@@ -1141,7 +1151,7 @@ pub fn interpret_program_with_heap_and_entry(
             0x29 => {
                 let key = state.stack.pop().ok_or_else(underflow)?;
                 let obj_val = state.stack.pop().ok_or_else(underflow)?;
-                let key_str = value_to_prop_key(&key);
+                let key_str = value_to_prop_key_with_heap(&key, heap);
                 let result = match &obj_val {
                     Value::Object(id) => {
                         state.getprop_cache.invalidate(*id, false, &key_str);
@@ -1236,6 +1246,19 @@ pub fn interpret_program_with_heap_and_entry(
                 } else {
                     val
                 };
+                let mut result = result;
+                if let Some(target_promise_id) = popped
+                    .as_ref()
+                    .and_then(|frame| state.promise_chain_targets.remove(&frame.id))
+                {
+                    if let Some(target_promise) = heap.get_promise_mut(target_promise_id)
+                        && matches!(target_promise.state, crate::runtime::PromiseState::Pending)
+                    {
+                        target_promise.state =
+                            crate::runtime::PromiseState::Fulfilled(result.clone());
+                    }
+                    result = Value::Promise(target_promise_id);
+                }
                 state.stack.truncate(callee_stack_base);
                 if state.frames.is_empty() {
                     return Ok(Completion::Return(result));
@@ -1262,12 +1285,7 @@ pub fn interpret_program_with_heap_and_entry(
                         .cloned()
                         .unwrap_or(Value::Undefined);
                     if let Some(completion) = propagate_call_throw(
-                        program,
-                        heap,
-                        &mut state,
-                        &chunk,
-                        trace_pc,
-                        thrown_val,
+                        program, heap, &mut state, &chunk, trace_pc, thrown_val,
                     )? {
                         return Ok(completion);
                     }
@@ -1361,7 +1379,9 @@ pub fn interpret_program_with_heap_and_entry(
                 pc += 2;
                 let call_pc = trace_pc;
                 let mut has_eval_scope = false;
-                if builtins::category(builtin_id) == "Global" && builtins::name(builtin_id) == "eval" {
+                if builtins::category(builtin_id) == "Global"
+                    && builtins::name(builtin_id) == "eval"
+                {
                     let mut eval_scope_bindings = Vec::with_capacity(chunk.named_locals.len());
                     for (name, slot) in &chunk.named_locals {
                         let slot_index = *slot as usize;
@@ -1386,9 +1406,9 @@ pub fn interpret_program_with_heap_and_entry(
                     }
                     Ok(BuiltinResult::Throw(v)) => {
                         let thrown = normalize_builtin_throw_value(heap, v);
-                        if let Some(completion) =
-                            propagate_call_throw(program, heap, &mut state, &chunk, call_pc, thrown)?
-                        {
+                        if let Some(completion) = propagate_call_throw(
+                            program, heap, &mut state, &chunk, call_pc, thrown,
+                        )? {
                             return Ok(completion);
                         }
                         continue;
@@ -1442,7 +1462,8 @@ pub fn interpret_program_with_heap_and_entry(
                 match callee {
                     Value::Builtin(builtin_id) => {
                         let name = builtins::name(builtin_id);
-                        let is_typed_array_constructor = builtins::category(builtin_id) == "TypedArray"
+                        let is_typed_array_constructor = builtins::category(builtin_id)
+                            == "TypedArray"
                             && matches!(
                                 name,
                                 "Int32Array"
@@ -1510,6 +1531,19 @@ pub fn interpret_program_with_heap_and_entry(
                             .get(heap_idx)
                             .ok_or(VmError::InvalidConstIndex(heap_idx))?
                             .clone();
+                        if callee_chunk.is_generator {
+                            let gen_id = create_generator_state(
+                                heap,
+                                &callee_chunk,
+                                heap_idx,
+                                true,
+                                &args,
+                                this_value.clone(),
+                            );
+                            state.stack.push(Value::Generator(gen_id));
+                            state.frames[frame_idx].pc = pc;
+                            continue;
+                        }
                         if !dynamic_chunk_has_captures(heap, heap_idx, &callee_chunk)
                             && let Some(value) =
                                 state
@@ -1565,6 +1599,19 @@ pub fn interpret_program_with_heap_and_entry(
                             .chunks
                             .get(func_idx)
                             .ok_or(VmError::InvalidConstIndex(func_idx))?;
+
+                        if callee_chunk.is_generator {
+                            let gen_id = create_generator_state_static(
+                                heap,
+                                callee_chunk,
+                                func_idx,
+                                &args,
+                                this_value.clone(),
+                            );
+                            state.stack.push(Value::Generator(gen_id));
+                            state.frames[frame_idx].pc = pc;
+                            continue;
+                        }
 
                         if let Some(value) = state.tiering.maybe_execute(
                             func_idx,
@@ -1723,9 +1770,9 @@ pub fn interpret_program_with_heap_and_entry(
                                 "TypeError",
                                 "callee is not a function (got object)".to_string(),
                             );
-                            if let Some(completion) =
-                                propagate_call_throw(program, heap, &mut state, &chunk, call_pc, thrown)?
-                            {
+                            if let Some(completion) = propagate_call_throw(
+                                program, heap, &mut state, &chunk, call_pc, thrown,
+                            )? {
                                 return Ok(completion);
                             }
                             continue;
@@ -1735,11 +1782,14 @@ pub fn interpret_program_with_heap_and_entry(
                         let thrown = create_native_error(
                             heap,
                             "TypeError",
-                            format!("callee is not a function (got {})", callee.type_name_for_error(),),
+                            format!(
+                                "callee is not a function (got {})",
+                                callee.type_name_for_error(),
+                            ),
                         );
-                        if let Some(completion) =
-                            propagate_call_throw(program, heap, &mut state, &chunk, call_pc, thrown)?
-                        {
+                        if let Some(completion) = propagate_call_throw(
+                            program, heap, &mut state, &chunk, call_pc, thrown,
+                        )? {
                             return Ok(completion);
                         }
                         continue;
@@ -1989,9 +2039,9 @@ pub fn interpret_program_with_heap_and_entry(
                                 "TypeError",
                                 "callee is not a function (got object)".to_string(),
                             );
-                            if let Some(completion) =
-                                propagate_call_throw(program, heap, &mut state, &chunk, trace_pc, thrown)?
-                            {
+                            if let Some(completion) = propagate_call_throw(
+                                program, heap, &mut state, &chunk, trace_pc, thrown,
+                            )? {
                                 return Ok(completion);
                             }
                             continue;
@@ -2001,11 +2051,14 @@ pub fn interpret_program_with_heap_and_entry(
                         let thrown = create_native_error(
                             heap,
                             "TypeError",
-                            format!("callee is not a function (got {})", callee.type_name_for_error(),),
+                            format!(
+                                "callee is not a function (got {})",
+                                callee.type_name_for_error(),
+                            ),
                         );
-                        if let Some(completion) =
-                            propagate_call_throw(program, heap, &mut state, &chunk, trace_pc, thrown)?
-                        {
+                        if let Some(completion) = propagate_call_throw(
+                            program, heap, &mut state, &chunk, trace_pc, thrown,
+                        )? {
                             return Ok(completion);
                         }
                         continue;
@@ -2063,17 +2116,17 @@ pub fn interpret_program_with_heap_and_entry(
                 };
                 match &obj {
                     Value::Object(id) => {
-                        set_object_property_with_arguments_mapping(
-                            &mut state,
-                            &chunk,
-                            stack_base,
-                            num_locals,
-                            *id,
-                            &key_str,
-                            &value,
-                            true,
-                            heap,
-                        );
+                        if let Some(thrown) = set_object_property_with_arguments_mapping(
+                            &mut state, &chunk, stack_base, num_locals, *id, &key_str, &value,
+                            true, heap,
+                        ) {
+                            if let Some(completion) = propagate_call_throw(
+                                program, heap, &mut state, &chunk, trace_pc, thrown,
+                            )? {
+                                return Ok(completion);
+                            }
+                            continue;
+                        }
                     }
                     Value::Array(id) => {
                         state.getprop_cache.invalidate(*id, true, &key_str);
@@ -2115,17 +2168,17 @@ pub fn interpret_program_with_heap_and_entry(
                 let key_str = value_to_prop_key_with_heap(&key, heap);
                 match &obj {
                     Value::Object(id) => {
-                        set_object_property_with_arguments_mapping(
-                            &mut state,
-                            &chunk,
-                            stack_base,
-                            num_locals,
-                            *id,
-                            &key_str,
-                            &value,
-                            false,
-                            heap,
-                        );
+                        if let Some(thrown) = set_object_property_with_arguments_mapping(
+                            &mut state, &chunk, stack_base, num_locals, *id, &key_str, &value,
+                            false, heap,
+                        ) {
+                            if let Some(completion) = propagate_call_throw(
+                                program, heap, &mut state, &chunk, trace_pc, thrown,
+                            )? {
+                                return Ok(completion);
+                            }
+                            continue;
+                        }
                     }
                     Value::Array(id) => heap.set_array_prop(*id, &key_str, value.clone()),
                     Value::Map(id) => heap.map_set(*id, &key_str, value.clone()),
@@ -2177,17 +2230,17 @@ pub fn interpret_program_with_heap_and_entry(
                 };
                 match &obj {
                     Value::Object(id) => {
-                        set_object_property_with_arguments_mapping(
-                            &mut state,
-                            &chunk,
-                            stack_base,
-                            num_locals,
-                            *id,
-                            &key_str,
-                            &value,
-                            true,
-                            heap,
-                        );
+                        if let Some(thrown) = set_object_property_with_arguments_mapping(
+                            &mut state, &chunk, stack_base, num_locals, *id, &key_str, &value,
+                            true, heap,
+                        ) {
+                            if let Some(completion) = propagate_call_throw(
+                                program, heap, &mut state, &chunk, trace_pc, thrown,
+                            )? {
+                                return Ok(completion);
+                            }
+                            continue;
+                        }
                     }
                     Value::Array(id) => {
                         state.getprop_cache.invalidate(*id, true, &key_str);
@@ -2328,7 +2381,16 @@ pub fn interpret_program_with_heap_and_entry(
                 }
             }
 
-            _ => return Err(VmError::InvalidOpcode(op)),
+            _ => {
+                eprintln!(
+                    "debug invalid opcode: op=0x{op:02x} chunk={} pc={} trace_pc={} code_len={}",
+                    chunk_index,
+                    pc,
+                    trace_pc,
+                    code.len()
+                );
+                return Err(VmError::InvalidOpcode(op));
+            }
         }
         if frame_idx < state.frames.len() {
             state.frames[frame_idx].pc = pc;
@@ -2357,13 +2419,25 @@ fn propagate_call_throw(
         let popped_frame = state.frames.pop();
         if let Some(frame) = popped_frame.as_ref() {
             write_back_dynamic_captures_for_frame(state, heap, frame);
+            if let Some(target_promise_id) = state.promise_chain_targets.remove(&frame.id) {
+                if let Some(target_promise) = heap.get_promise_mut(target_promise_id)
+                    && matches!(target_promise.state, crate::runtime::PromiseState::Pending)
+                {
+                    target_promise.state =
+                        crate::runtime::PromiseState::Rejected(uncaught_value.clone());
+                }
+                state.stack.truncate(frame.stack_base);
+                state.stack.push(Value::Promise(target_promise_id));
+                return Ok(None);
+            }
             if frame.is_dynamic {
                 state.chunks_stack.pop();
             }
             state.stack.truncate(frame.stack_base);
             if frame.is_async {
-                let rejected_promise_id =
-                    heap.alloc_promise(crate::runtime::PromiseState::Rejected(uncaught_value.clone()));
+                let rejected_promise_id = heap.alloc_promise(
+                    crate::runtime::PromiseState::Rejected(uncaught_value.clone()),
+                );
                 let rejected_promise = Value::Promise(rejected_promise_id);
                 if state.frames.is_empty() {
                     return Ok(Some(Completion::Return(rejected_promise)));
@@ -2414,6 +2488,18 @@ fn handle_apply_invoke(
     mut args: Vec<Value>,
     mut new_object: Option<usize>,
 ) -> Result<Option<Completion>, VmError> {
+    let mut promise_chain_target = None;
+    if new_object == Some(PROMISE_CHAIN_SENTINEL) {
+        let maybe_target = match args.last() {
+            Some(Value::Int(promise_id)) if *promise_id >= 0 => Some(*promise_id as usize),
+            _ => None,
+        };
+        if let Some(target) = maybe_target {
+            args.pop();
+            promise_chain_target = Some(target);
+            new_object = None;
+        }
+    }
     loop {
         let bind_unwrap = match &callee {
             Value::BoundFunction(target, bound_this, bound_args) => {
@@ -2439,14 +2525,44 @@ fn handle_apply_invoke(
                 match execute_builtin(*builtin_id, args.len() + 1, &mut state.stack, &mut ctx) {
                     Ok(BuiltinResult::Push(v)) => {
                         state.getprop_cache.invalidate_all();
-                        state.stack.push(v);
+                        if let Some(target_promise_id) = promise_chain_target {
+                            if let Some(target_promise) = heap.get_promise_mut(target_promise_id)
+                                && matches!(
+                                    target_promise.state,
+                                    crate::runtime::PromiseState::Pending
+                                )
+                            {
+                                target_promise.state = crate::runtime::PromiseState::Fulfilled(v);
+                            }
+                            state.stack.push(Value::Promise(target_promise_id));
+                        } else {
+                            state.stack.push(v);
+                        }
                         return Ok(None);
                     }
                     Ok(BuiltinResult::Throw(v)) => {
                         let thrown = normalize_builtin_throw_value(heap, v);
-                        if let Some(completion) =
-                            propagate_call_throw(program, heap, state, current_chunk, call_pc, thrown)?
-                        {
+                        if let Some(target_promise_id) = promise_chain_target {
+                            if let Some(target_promise) = heap.get_promise_mut(target_promise_id)
+                                && matches!(
+                                    target_promise.state,
+                                    crate::runtime::PromiseState::Pending
+                                )
+                            {
+                                target_promise.state =
+                                    crate::runtime::PromiseState::Rejected(thrown);
+                            }
+                            state.stack.push(Value::Promise(target_promise_id));
+                            return Ok(None);
+                        }
+                        if let Some(completion) = propagate_call_throw(
+                            program,
+                            heap,
+                            state,
+                            current_chunk,
+                            call_pc,
+                            thrown,
+                        )? {
                             return Ok(Some(completion));
                         }
                         return Ok(None);
@@ -2488,6 +2604,7 @@ fn handle_apply_invoke(
                     return Ok(None);
                 }
                 if !dynamic_chunk_has_captures(heap, *heap_idx, &callee_chunk)
+                    && promise_chain_target.is_none()
                     && let Some(value) =
                         state
                             .tiering
@@ -2531,6 +2648,11 @@ fn handle_apply_invoke(
                     generator_id: None,
                     is_async: chunk_is_async,
                 });
+                if let Some(target_promise_id) = promise_chain_target {
+                    state
+                        .promise_chain_targets
+                        .insert(frame_id, target_promise_id);
+                }
                 return Ok(None);
             }
             Value::Function(func_idx) => {
@@ -2551,18 +2673,41 @@ fn handle_apply_invoke(
                     return Ok(None);
                 }
 
-                if let Some(value) =
-                    state
-                        .tiering
-                        .maybe_execute(*func_idx, callee_chunk, &args, &program.chunks)
+                if promise_chain_target.is_none()
+                    && let Some(value) =
+                        state
+                            .tiering
+                            .maybe_execute(*func_idx, callee_chunk, &args, &program.chunks)
                 {
                     state.stack.push(value);
                     return Ok(None);
                 }
 
                 let chunk_is_async = callee_chunk.is_async;
-                let callee_locals =
+                let mut callee_locals =
                     setup_static_function_locals(callee_chunk, &args, *func_idx, heap);
+                if callee_chunk
+                    .captured_names
+                    .iter()
+                    .any(|captured_name| captured_name == "__super__")
+                    && let Some(caller_frame) = state.frames.last()
+                    && let Some((_, caller_super_slot)) = current_chunk
+                        .named_locals
+                        .iter()
+                        .find(|(name, _)| name == "__super__")
+                    && let Some((_, callee_super_slot)) = callee_chunk
+                        .named_locals
+                        .iter()
+                        .find(|(name, _)| name == "__super__")
+                {
+                    let caller_index = caller_frame.stack_base + *caller_super_slot as usize;
+                    if let Some(super_value) = state.stack.get(caller_index).cloned() {
+                        let callee_slot = *callee_super_slot as usize;
+                        if callee_slot < callee_locals.len() {
+                            callee_locals[callee_slot] = super_value;
+                        }
+                    }
+                }
                 let stack_base = state.stack.len();
                 state.stack.extend(callee_locals);
                 let frame_id = state.allocate_frame_id();
@@ -2580,6 +2725,11 @@ fn handle_apply_invoke(
                     generator_id: None,
                     is_async: chunk_is_async,
                 });
+                if let Some(target_promise_id) = promise_chain_target {
+                    state
+                        .promise_chain_targets
+                        .insert(frame_id, target_promise_id);
+                }
                 return Ok(None);
             }
             Value::BoundBuiltin(builtin_id, bound_val, append_target) => {
@@ -2604,9 +2754,14 @@ fn handle_apply_invoke(
                     }
                     Ok(BuiltinResult::Throw(v)) => {
                         let thrown = normalize_builtin_throw_value(heap, v);
-                        if let Some(completion) =
-                            propagate_call_throw(program, heap, state, current_chunk, call_pc, thrown)?
-                        {
+                        if let Some(completion) = propagate_call_throw(
+                            program,
+                            heap,
+                            state,
+                            current_chunk,
+                            call_pc,
+                            thrown,
+                        )? {
                             return Ok(Some(completion));
                         }
                         return Ok(None);
@@ -2694,7 +2849,10 @@ fn handle_apply_invoke(
                 let thrown = create_native_error(
                     heap,
                     "TypeError",
-                    format!("callee is not a function (got {})", callee.type_name_for_error(),),
+                    format!(
+                        "callee is not a function (got {})",
+                        callee.type_name_for_error(),
+                    ),
                 );
                 if let Some(completion) =
                     propagate_call_throw(program, heap, state, current_chunk, call_pc, thrown)?

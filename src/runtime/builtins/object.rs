@@ -47,7 +47,9 @@ fn has_own_property_for_target(target: Option<&Value>, key: &str, heap: &Heap) -
     match target {
         Some(Value::Object(id)) => heap.object_has_own_property(*id, key),
         Some(Value::Array(id)) => heap.array_has_own_property(*id, key),
-        Some(Value::Function(function_index)) => heap.function_has_own_property(*function_index, key),
+        Some(Value::Function(function_index)) => {
+            heap.function_has_own_property(*function_index, key)
+        }
         Some(Value::Builtin(id)) => {
             ((key == "length" || key == "name") && !heap.builtin_prop_deleted(*id, key))
                 || (is_typed_array_constructor(*id)

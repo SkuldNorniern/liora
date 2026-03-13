@@ -30,6 +30,7 @@ mod regex_engine;
 mod regexp;
 mod set;
 mod string;
+mod stubs;
 mod symbol;
 mod timeout;
 mod typed_array;
@@ -1308,6 +1309,66 @@ const BUILTINS: &[BuiltinDef] = &[
         entry: BuiltinEntry::Normal(number::is_finite),
     },
     BuiltinDef {
+        category: "Global",
+        name: "BigInt",
+        entry: BuiltinEntry::Throwing(stubs::bigint_constructor),
+    },
+    BuiltinDef {
+        category: "Global",
+        name: "SharedArrayBuffer",
+        entry: BuiltinEntry::Throwing(stubs::unsupported_shared_array_buffer),
+    },
+    BuiltinDef {
+        category: "Global",
+        name: "DisposableStack",
+        entry: BuiltinEntry::Throwing(stubs::unsupported_disposable_stack),
+    },
+    BuiltinDef {
+        category: "Global",
+        name: "SuppressedError",
+        entry: BuiltinEntry::Throwing(stubs::unsupported_suppressed_error),
+    },
+    BuiltinDef {
+        category: "Iterator",
+        name: "from",
+        entry: BuiltinEntry::Throwing(stubs::iterator_from),
+    },
+    BuiltinDef {
+        category: "Iterator",
+        name: "wrapNext",
+        entry: BuiltinEntry::Throwing(iterator::wrap_next),
+    },
+    BuiltinDef {
+        category: "Iterator",
+        name: "wrapReturn",
+        entry: BuiltinEntry::Throwing(iterator::wrap_return),
+    },
+    BuiltinDef {
+        category: "Iterator",
+        name: "prototypeIterator",
+        entry: BuiltinEntry::Throwing(iterator::prototype_iterator),
+    },
+    BuiltinDef {
+        category: "Iterator",
+        name: "prototypeDispose",
+        entry: BuiltinEntry::Throwing(iterator::prototype_dispose),
+    },
+    BuiltinDef {
+        category: "Iterator",
+        name: "prototypeToStringTagGet",
+        entry: BuiltinEntry::Throwing(iterator::prototype_to_string_tag_get),
+    },
+    BuiltinDef {
+        category: "Iterator",
+        name: "prototypeToStringTagSet",
+        entry: BuiltinEntry::Throwing(iterator::prototype_to_string_tag_set),
+    },
+    BuiltinDef {
+        category: "Atomics",
+        name: "op",
+        entry: BuiltinEntry::Throwing(stubs::unsupported_atomics),
+    },
+    BuiltinDef {
         category: "TypedArray",
         name: "DataView",
         entry: BuiltinEntry::Throwing(typed_array::data_view),
@@ -1499,7 +1560,7 @@ const BUILTINS: &[BuiltinDef] = &[
     },
 ];
 
-pub const MAX_BUILTIN_ID: u8 = (BUILTINS.len() - 1) as u8;
+pub const MAX_BUILTIN_ID: usize = BUILTINS.len() - 1;
 
 fn index_for(id: u8) -> Option<usize> {
     let idx = id as usize;
@@ -1513,7 +1574,11 @@ fn index_for(id: u8) -> Option<usize> {
 pub fn name(id: u8) -> &'static str {
     index_for(id)
         .and_then(|i| BUILTINS.get(i))
-        .map(|b| b.name)
+        .map(|b| match (b.category, b.name) {
+            ("Iterator", "prototypeIterator") => "[Symbol.iterator]",
+            ("Iterator", "prototypeDispose") => "[Symbol.dispose]",
+            _ => b.name,
+        })
         .unwrap_or("?")
 }
 
@@ -1536,6 +1601,9 @@ pub fn length(id: u8) -> i32 {
             ("Reflect", "set") | ("Reflect", "apply") | ("Reflect", "defineProperty") => 3,
             ("Reflect", "construct") => 2,
             ("Global", "escape") | ("Global", "unescape") => 1,
+            ("Global", "BigInt") | ("Global", "SharedArrayBuffer") => 1,
+            ("Iterator", "from") => 1,
+            ("Iterator", "prototypeToStringTagSet") => 1,
             ("Error", "ReferenceError")
             | ("Error", "TypeError")
             | ("Error", "RangeError")

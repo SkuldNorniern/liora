@@ -1,6 +1,6 @@
 //! Reflect builtin stubs for test262. apply throws; get/construct implement [[Get]]/[[Construct]].
 
-use super::{error, to_prop_key_with_heap, BuiltinContext, BuiltinError};
+use super::{BuiltinContext, BuiltinError, error, to_prop_key_with_heap};
 use crate::runtime::Value;
 
 fn array_like_to_values(arr: &Value, heap: &crate::runtime::Heap) -> Vec<Value> {

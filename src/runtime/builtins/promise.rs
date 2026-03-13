@@ -1,6 +1,8 @@
 use super::{BuiltinContext, BuiltinError};
 use crate::runtime::{PromiseState, Value};
 
+const PROMISE_CHAIN_SENTINEL: usize = usize::MAX;
+
 /// Promise constructor: new Promise((resolve, reject) => {...})
 pub fn promise_constructor(
     args: &[Value],
@@ -121,7 +123,7 @@ pub fn promise_then(args: &[Value], ctx: &mut BuiltinContext) -> Result<Value, B
                     callee: on_fulfilled,
                     this_arg: Value::Undefined,
                     args: vec![val, Value::Int(new_promise_id as i32)],
-                    new_object: None,
+                    new_object: Some(PROMISE_CHAIN_SENTINEL),
                 })
             }
             _ => {
@@ -136,7 +138,7 @@ pub fn promise_then(args: &[Value], ctx: &mut BuiltinContext) -> Result<Value, B
                     callee: on_rejected,
                     this_arg: Value::Undefined,
                     args: vec![err, Value::Int(new_promise_id as i32)],
-                    new_object: None,
+                    new_object: Some(PROMISE_CHAIN_SENTINEL),
                 })
             }
             _ => {
@@ -177,7 +179,7 @@ pub fn promise_catch(args: &[Value], ctx: &mut BuiltinContext) -> Result<Value, 
                     callee: on_rejected,
                     this_arg: Value::Undefined,
                     args: vec![err, Value::Int(new_promise_id as i32)],
-                    new_object: None,
+                    new_object: Some(PROMISE_CHAIN_SENTINEL),
                 })
             }
             _ => {

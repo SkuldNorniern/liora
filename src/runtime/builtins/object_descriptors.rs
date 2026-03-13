@@ -3,7 +3,8 @@ use crate::runtime::builtins::internal;
 use crate::runtime::{Heap, Value};
 
 use super::{
-    is_typed_array_constructor, object_static_args, to_prop_key_with_heap, visible_object_property_names,
+    is_typed_array_constructor, object_static_args, to_prop_key_with_heap,
+    visible_object_property_names,
 };
 
 fn create_data_descriptor(
@@ -38,6 +39,15 @@ fn create_accessor_descriptor(
 
 fn is_regexp_constructor_object(object_id: usize, heap: &Heap) -> bool {
     matches!(heap.get_global("RegExp"), Value::Object(regexp_id) if regexp_id == object_id)
+}
+
+fn is_iterator_prototype_object(object_id: usize, heap: &Heap) -> bool {
+    match heap.get_global("Iterator") {
+        Value::Object(iterator_constructor_id) => {
+            matches!(heap.get_prop(iterator_constructor_id, "prototype"), Value::Object(iterator_prototype_id) if iterator_prototype_id == object_id)
+        }
+        _ => false,
+    }
 }
 
 fn regexp_legacy_accessor_ids(key: &str) -> Option<(u8, Option<u8>)> {
@@ -86,6 +96,21 @@ pub fn get_own_property_descriptor(args: &[Value], heap: &mut Heap) -> Value {
         Value::Object(id) => {
             if internal::is_internal_property_name(&key) {
                 return Value::Undefined;
+            }
+            if is_iterator_prototype_object(*id, heap)
+                && key == "Symbol.toStringTag"
+                && let (Some(getter_id), Some(setter_id)) = (
+                    builtins::resolve("Iterator", "prototypeToStringTagGet"),
+                    builtins::resolve("Iterator", "prototypeToStringTagSet"),
+                )
+            {
+                return create_accessor_descriptor(
+                    Value::Builtin(getter_id),
+                    Value::Builtin(setter_id),
+                    false,
+                    true,
+                    heap,
+                );
             }
             if is_regexp_constructor_object(*id, heap)
                 && heap.object_has_own_property(*id, &key)

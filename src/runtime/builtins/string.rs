@@ -1,4 +1,4 @@
-use super::{regex_engine, to_number, to_prop_key, BuiltinContext, BuiltinError};
+use super::{BuiltinContext, BuiltinError, regex_engine, to_number, to_prop_key};
 use crate::runtime::{Heap, Value};
 
 fn html_escape(s: &str) -> String {

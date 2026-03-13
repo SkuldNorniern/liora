@@ -9,11 +9,7 @@ pub struct CompiledFunction {
 }
 
 fn local_operand_size(slot: u32) -> usize {
-    if slot < 256 {
-        2
-    } else {
-        3
-    }
+    if slot < 256 { 2 } else { 3 }
 }
 
 fn emit_load_local(code: &mut Vec<u8>, slot: u32) {

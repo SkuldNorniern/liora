@@ -1,7 +1,7 @@
 use crate::diagnostics::{ErrorCode, Span};
+use crate::frontend::Lexer;
 use crate::frontend::ast::*;
 use crate::frontend::token_type::{Token, TokenType};
-use crate::frontend::Lexer;
 
 const MAX_RECURSION: u32 = 256;
 
@@ -332,9 +332,39 @@ impl Parser {
                 });
             }
         };
+        if name == "await" && self.async_depth > 0 {
+            return Err(ParseError {
+                code: ErrorCode::ParseUnexpectedToken,
+                message: "await is reserved in async functions".to_string(),
+                span: Some(token.span),
+            });
+        }
         let span = token.span;
         self.advance();
         Ok((name, span))
+    }
+
+    fn has_await_token_between(&self, start_index: usize, end_index_exclusive: usize) -> bool {
+        self.has_token_between(start_index, end_index_exclusive, TokenType::Await)
+    }
+
+    fn has_super_token_between(&self, start_index: usize, end_index_exclusive: usize) -> bool {
+        self.has_token_between(start_index, end_index_exclusive, TokenType::Super)
+    }
+
+    fn has_token_between(
+        &self,
+        start_index: usize,
+        end_index_exclusive: usize,
+        token_type: TokenType,
+    ) -> bool {
+        if start_index >= end_index_exclusive || end_index_exclusive > self.tokens.len() {
+            return false;
+        }
+        let target = std::mem::discriminant(&token_type);
+        self.tokens[start_index..end_index_exclusive]
+            .iter()
+            .any(|token| std::mem::discriminant(&token.token_type) == target)
     }
 
     fn optional(&mut self, tt: TokenType) -> bool {
@@ -440,6 +470,17 @@ impl Parser {
             })?
             .clone();
 
+        if token.token_type == TokenType::Identifier
+            && token.lexeme == "async"
+            && matches!(self.peek(), Some(TokenType::Function))
+        {
+            return Err(ParseError {
+                code: ErrorCode::ParseUnexpectedToken,
+                message: "escaped async keyword is not allowed".to_string(),
+                span: Some(token.span),
+            });
+        }
+
         if matches!(&token.token_type, TokenType::Identifier)
             && matches!(self.peek(), Some(TokenType::Colon))
         {
@@ -486,6 +527,13 @@ impl Parser {
     fn parse_labeled_statement(&mut self) -> Result<Statement, ParseError> {
         let label_tok = self.expect(TokenType::Identifier)?;
         let label = label_tok.lexeme.clone();
+        if self.async_depth > 0 && label == "await" {
+            return Err(ParseError {
+                code: ErrorCode::ParseUnexpectedToken,
+                message: "await is reserved in async functions".to_string(),
+                span: Some(label_tok.span),
+            });
+        }
         let start_span = label_tok.span;
         self.expect(TokenType::Colon)?;
         let body = Box::new(self.parse_statement()?);
@@ -529,8 +577,23 @@ impl Parser {
         let name = name_tok.lexeme.clone();
 
         self.expect(TokenType::LeftParen)?;
+        let params_start_index = self.pos;
         let params = self.parse_params()?;
-        self.expect(TokenType::RightParen)?;
+        let right_paren = self.expect(TokenType::RightParen)?;
+        if is_async && self.has_await_token_between(params_start_index, self.pos - 1) {
+            return Err(ParseError {
+                code: ErrorCode::ParseUnexpectedToken,
+                message: "await is reserved in async function parameter lists".to_string(),
+                span: Some(right_paren.span),
+            });
+        }
+        if is_async && self.has_super_token_between(params_start_index, self.pos - 1) {
+            return Err(ParseError {
+                code: ErrorCode::ParseUnexpectedToken,
+                message: "super is not allowed in async function parameter lists".to_string(),
+                span: Some(right_paren.span),
+            });
+        }
 
         if is_generator {
             self.generator_depth += 1;
@@ -586,14 +649,18 @@ impl Parser {
                 match binding {
                     Binding::ObjectPattern(props) => {
                         if let Some(expr) = default_expr {
-                            params.push(crate::frontend::ast::Param::ObjectPatternDefault(props, expr));
+                            params.push(crate::frontend::ast::Param::ObjectPatternDefault(
+                                props, expr,
+                            ));
                         } else {
                             params.push(crate::frontend::ast::Param::ObjectPattern(props));
                         }
                     }
                     Binding::ArrayPattern(elems) => {
                         if let Some(expr) = default_expr {
-                            params.push(crate::frontend::ast::Param::ArrayPatternDefault(elems, expr));
+                            params.push(crate::frontend::ast::Param::ArrayPatternDefault(
+                                elems, expr,
+                            ));
                         } else {
                             params.push(crate::frontend::ast::Param::ArrayPattern(elems));
                         }
@@ -640,8 +707,23 @@ impl Parser {
         is_async: bool,
     ) -> Result<Expression, ParseError> {
         self.expect(TokenType::LeftParen)?;
+        let params_start_index = self.pos;
         let params = self.parse_params()?;
-        self.expect(TokenType::RightParen)?;
+        let right_paren = self.expect(TokenType::RightParen)?;
+        if is_async && self.has_await_token_between(params_start_index, self.pos - 1) {
+            return Err(ParseError {
+                code: ErrorCode::ParseUnexpectedToken,
+                message: "await is reserved in async function parameter lists".to_string(),
+                span: Some(right_paren.span),
+            });
+        }
+        if is_async && self.has_super_token_between(params_start_index, self.pos - 1) {
+            return Err(ParseError {
+                code: ErrorCode::ParseUnexpectedToken,
+                message: "super is not allowed in async function parameter lists".to_string(),
+                span: Some(right_paren.span),
+            });
+        }
         if is_generator {
             self.generator_depth += 1;
         }
@@ -689,8 +771,23 @@ impl Parser {
             None
         };
         self.expect(TokenType::LeftParen)?;
+        let params_start_index = self.pos;
         let params = self.parse_params()?;
-        self.expect(TokenType::RightParen)?;
+        let right_paren = self.expect(TokenType::RightParen)?;
+        if is_async && self.has_await_token_between(params_start_index, self.pos - 1) {
+            return Err(ParseError {
+                code: ErrorCode::ParseUnexpectedToken,
+                message: "await is reserved in async function parameter lists".to_string(),
+                span: Some(right_paren.span),
+            });
+        }
+        if is_async && self.has_super_token_between(params_start_index, self.pos - 1) {
+            return Err(ParseError {
+                code: ErrorCode::ParseUnexpectedToken,
+                message: "super is not allowed in async function parameter lists".to_string(),
+                span: Some(right_paren.span),
+            });
+        }
         if is_generator {
             self.generator_depth += 1;
         }
@@ -770,16 +867,18 @@ impl Parser {
             let is_get = !method_is_async
                 && !method_is_generator
                 && matches!(
-                self.current().map(|t| &t.token_type),
-                Some(TokenType::Identifier)
-            ) && self.current().map(|t| t.lexeme.as_str()) == Some("get")
+                    self.current().map(|t| &t.token_type),
+                    Some(TokenType::Identifier)
+                )
+                && self.current().map(|t| t.lexeme.as_str()) == Some("get")
                 && !matches!(self.peek(), Some(TokenType::LeftParen));
             let is_set = !method_is_async
                 && !method_is_generator
                 && matches!(
-                self.current().map(|t| &t.token_type),
-                Some(TokenType::Identifier)
-            ) && self.current().map(|t| t.lexeme.as_str()) == Some("set")
+                    self.current().map(|t| &t.token_type),
+                    Some(TokenType::Identifier)
+                )
+                && self.current().map(|t| t.lexeme.as_str()) == Some("set")
                 && !matches!(self.peek(), Some(TokenType::LeftParen));
 
             if is_get || is_set {
@@ -794,6 +893,10 @@ impl Parser {
                 let expr = self.parse_expression()?;
                 self.expect(TokenType::RightBracket)?;
                 ClassMemberKey::Computed(Box::new(expr))
+            } else if matches!(self.current().map(|t| &t.token_type), Some(TokenType::Hash)) {
+                self.advance();
+                let private_name = self.expect_property_name()?.lexeme;
+                ClassMemberKey::PrivateIdent(private_name)
             } else {
                 let name = self.parse_property_key_name()?;
                 ClassMemberKey::Ident(name)
@@ -2102,10 +2205,14 @@ impl Parser {
                             });
                         }
                         ArrayElement::Expr(Expression::Assign(assign)) => {
-                            let binding = self.expression_to_for_in_of_pattern(assign.left.as_ref())?;
+                            let binding =
+                                self.expression_to_for_in_of_pattern(assign.left.as_ref())?;
                             let mut default_init = *assign.right.clone();
                             for binding_name in binding.names() {
-                                Self::assign_default_initializer_name(&mut default_init, binding_name);
+                                Self::assign_default_initializer_name(
+                                    &mut default_init,
+                                    binding_name,
+                                );
                             }
                             elems.push(ArrayPatternElem {
                                 binding: Some(binding),
@@ -2165,7 +2272,7 @@ impl Parser {
         let start_span = self.expect(TokenType::Const)?.span;
         let id = self.next_id();
         let declarations = self.parse_declarators_with_options(true)?;
-        self.expect(TokenType::Semicolon)?;
+        self.optional(TokenType::Semicolon);
         let span = declarations
             .last()
             .map(|d| start_span.merge(d.span))
@@ -2912,7 +3019,26 @@ impl Parser {
                     (UnaryOp::Void, t.span)
                 }
                 TokenType::New => {
+                    let start_span = t.span;
                     self.advance();
+                    if matches!(self.current().map(|t| &t.token_type), Some(TokenType::Dot)) {
+                        self.advance();
+                        let target_token = self.expect_property_name()?;
+                        if target_token.lexeme != "target" {
+                            return Err(ParseError {
+                                code: ErrorCode::ParseUnexpectedTokenInExpr,
+                                message: "expected 'target' after new.".to_string(),
+                                span: Some(target_token.span),
+                            });
+                        }
+                        let span = start_span.merge(target_token.span);
+                        let new_target = Expression::NewTarget(NewTargetExpr {
+                            id: self.next_id(),
+                            span,
+                        });
+                        self.end_recursion();
+                        return self.parse_postfix_continued(new_target);
+                    }
                     let mut callee = self.parse_primary()?;
                     loop {
                         if matches!(self.current().map(|t| &t.token_type), Some(TokenType::Dot)) {
@@ -3079,9 +3205,16 @@ impl Parser {
                 );
                 let start_span = expr.span();
                 self.advance();
-                let prop_tok = self.expect_property_name()?;
-                let prop = prop_tok.lexeme.clone();
-                let span = start_span.merge(prop_tok.span);
+                let (prop, prop_span) =
+                    if matches!(self.current().map(|t| &t.token_type), Some(TokenType::Hash)) {
+                        self.advance();
+                        let private_tok = self.expect_property_name()?;
+                        (format!("#{}", private_tok.lexeme), private_tok.span)
+                    } else {
+                        let prop_tok = self.expect_property_name()?;
+                        (prop_tok.lexeme.clone(), prop_tok.span)
+                    };
+                let span = start_span.merge(prop_span);
                 expr = Expression::Member(MemberExpr {
                     id: self.next_id(),
                     span,
@@ -3282,6 +3415,13 @@ impl Parser {
             TokenType::Identifier => {
                 let span = token.span;
                 let name = token.lexeme.clone();
+                if self.async_depth > 0 && name == "await" {
+                    return Err(ParseError {
+                        code: ErrorCode::ParseUnexpectedToken,
+                        message: "await is reserved in async functions".to_string(),
+                        span: Some(span),
+                    });
+                }
                 self.advance();
                 if matches!(
                     self.current().map(|t| &t.token_type),
@@ -3479,7 +3619,8 @@ impl Parser {
                     let async_prefix = (matches!(
                         self.current().map(|t| &t.token_type),
                         Some(TokenType::Async) | Some(TokenType::Identifier)
-                    ) && self.current().map(|t| t.lexeme.as_str()) == Some("async"))
+                    ) && self.current().map(|t| t.lexeme.as_str())
+                        == Some("async"))
                         && !matches!(
                             self.peek(),
                             Some(TokenType::LeftParen)
@@ -5285,7 +5426,9 @@ mod tests {
 
     #[test]
     fn parse_object_literal_accessors() {
-        let script = parse_ok("({ get 0() { return 1; }, set [Symbol.match](value) { this.value = value; } });");
+        let script = parse_ok(
+            "({ get 0() { return 1; }, set [Symbol.match](value) { this.value = value; } });",
+        );
         if let Statement::Expression(expr_stmt) = &script.body[0]
             && let Expression::ObjectLiteral(object_literal) = expr_stmt.expression.as_ref()
         {

@@ -43,7 +43,10 @@ fn help_text() -> String {
     let opt_style = Style::builder().foreground(Color::Yellow).build();
     let dim_style = Style::builder().dim().build();
 
-    let title = format!("{} - JavaScript engine (ECMAScript 2026 aware)", "liora".style(header_style).to_string());
+    let title = format!(
+        "{} - JavaScript engine (ECMAScript 2026 aware)",
+        "liora".style(header_style).to_string()
+    );
     let usage_h = "USAGE:".style(header_style).to_string();
     let usage_line = format!("    liora <command> [options] [file]");
     let commands_h = "COMMANDS:".style(header_style).to_string();

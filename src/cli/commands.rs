@@ -2,7 +2,7 @@ use crate::cli::CliError;
 use crate::driver::Driver;
 use crate::frontend::ast;
 use crate::frontend::{Expression, Script, Statement, TokenType};
-use crate::test262::{load_allowlist, run_test, TestStatus};
+use crate::test262::{TestStatus, load_allowlist, run_test};
 use inksac::{Color, Style, Styleable};
 use std::path::Path;
 
@@ -382,6 +382,7 @@ fn format_expr(expr: &Expression) -> String {
             format!("class {}", e.name.as_deref().unwrap_or(""))
         }
         Expression::Super(_) => "super".to_string(),
+        Expression::NewTarget(_) => "new.target".to_string(),
         Expression::Yield(e) => {
             if let Some(arg) = &e.argument {
                 format!("yield {}", format_expr(arg))

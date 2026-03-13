@@ -47,6 +47,10 @@ pub fn check(script: &Script) -> Result<(), Vec<EarlyError>> {
 
 const STRICT_RESERVED: [&str; 2] = ["eval", "arguments"];
 
+fn is_simple_parameter_list(params: &[Param]) -> bool {
+    params.iter().all(|param| matches!(param, Param::Ident(_)))
+}
+
 fn is_strict_reserved(name: &str) -> bool {
     STRICT_RESERVED.contains(&name)
 }
@@ -57,8 +61,70 @@ struct CheckContext {
     in_iteration: bool,
     in_switch: bool,
     strict: bool,
+    allow_super: bool,
     iter_labels: Vec<String>,
     break_labels: Vec<String>,
+}
+
+fn param_binding_names(param: &Param) -> Vec<String> {
+    match param {
+        Param::Ident(name) | Param::Default(name, _) | Param::Rest(name) => vec![name.clone()],
+        Param::RestPattern(binding) => binding
+            .names()
+            .into_iter()
+            .map(std::string::ToString::to_string)
+            .collect(),
+        Param::ObjectPattern(props) | Param::ObjectPatternDefault(props, _) => {
+            Binding::ObjectPattern(props.clone())
+                .names()
+                .into_iter()
+                .map(std::string::ToString::to_string)
+                .collect()
+        }
+        Param::ArrayPattern(elems) | Param::ArrayPatternDefault(elems, _) => {
+            Binding::ArrayPattern(elems.clone())
+                .names()
+                .into_iter()
+                .map(std::string::ToString::to_string)
+                .collect()
+        }
+    }
+}
+
+fn top_level_lexical_names(body: &Statement) -> Vec<String> {
+    let mut names = Vec::new();
+    let Statement::Block(block) = body else {
+        return names;
+    };
+    for statement in &block.body {
+        match statement {
+            Statement::LetDecl(declaration) => {
+                for declarator in &declaration.declarations {
+                    names.extend(
+                        declarator
+                            .binding
+                            .names()
+                            .into_iter()
+                            .map(std::string::ToString::to_string),
+                    );
+                }
+            }
+            Statement::ConstDecl(declaration) => {
+                for declarator in &declaration.declarations {
+                    names.extend(
+                        declarator
+                            .binding
+                            .names()
+                            .into_iter()
+                            .map(std::string::ToString::to_string),
+                    );
+                }
+            }
+            Statement::ClassDecl(class_decl) => names.push(class_decl.name.clone()),
+            _ => {}
+        }
+    }
+    names
 }
 
 fn is_iteration(stmt: &Statement) -> bool {
@@ -107,7 +173,7 @@ fn check_class_body(
             ClassMemberKind::Method(func)
             | ClassMemberKind::Get(func)
             | ClassMemberKind::Set(func) => {
-                check_function_expression(func, scope, ctx, errors)
+                check_function_expression(func, scope, ctx, true, errors)
             }
             ClassMemberKind::Field(Some(init)) => check_expression(init, scope, ctx, errors),
             ClassMemberKind::Field(None) => {}
@@ -119,6 +185,7 @@ fn check_function_expression(
     function: &FunctionExprData,
     scope: &mut Scope,
     ctx: &CheckContext,
+    allow_super: bool,
     errors: &mut Vec<EarlyError>,
 ) {
     scope.enter_function();
@@ -133,6 +200,7 @@ fn check_function_expression(
         in_iteration: ctx.in_iteration,
         in_switch: ctx.in_switch,
         strict: fn_strict,
+        allow_super,
         iter_labels: ctx.iter_labels.clone(),
         break_labels: ctx.break_labels.clone(),
     };
@@ -147,7 +215,16 @@ fn check_expression(
     errors: &mut Vec<EarlyError>,
 ) {
     match expression {
-        Expression::Literal(_) | Expression::This(_) | Expression::Identifier(_) | Expression::Super(_) => {}
+        Expression::Literal(_) | Expression::This(_) | Expression::Identifier(_) => {}
+        Expression::Super(super_expr) => {
+            if !ctx.allow_super {
+                errors.push(EarlyError {
+                    code: ErrorCode::EarlyStrictReserved,
+                    message: "super is not allowed in this function context".to_string(),
+                    span: super_expr.span,
+                });
+            }
+        }
         Expression::Binary(b) => {
             check_expression(&b.left, scope, ctx, errors);
             check_expression(&b.right, scope, ctx, errors);
@@ -170,10 +247,7 @@ fn check_expression(
             {
                 errors.push(EarlyError {
                     code: ErrorCode::EarlyStrictReserved,
-                    message: format!(
-                        "'{}' may not be assigned in strict mode",
-                        identifier.name
-                    ),
+                    message: format!("'{}' may not be assigned in strict mode", identifier.name),
                     span: identifier.span,
                 });
             }
@@ -188,7 +262,9 @@ fn check_expression(
         Expression::ObjectLiteral(object_literal) => {
             for property_or_spread in &object_literal.properties {
                 match property_or_spread {
-                    ObjectPropertyOrSpread::Spread(expr) => check_expression(expr, scope, ctx, errors),
+                    ObjectPropertyOrSpread::Spread(expr) => {
+                        check_expression(expr, scope, ctx, errors)
+                    }
                     ObjectPropertyOrSpread::Property(property) => {
                         if let ObjectPropertyKey::Computed(expr) = &property.key {
                             check_expression(expr, scope, ctx, errors);
@@ -215,7 +291,7 @@ fn check_expression(
             }
         }
         Expression::FunctionExpr(function_expression) => {
-            check_function_expression(function_expression, scope, ctx, errors)
+            check_function_expression(function_expression, scope, ctx, false, errors)
         }
         Expression::ArrowFunction(arrow_function) => match &arrow_function.body {
             ArrowBody::Expression(expr) => check_expression(expr, scope, ctx, errors),
@@ -232,6 +308,7 @@ fn check_expression(
                     in_iteration: ctx.in_iteration,
                     in_switch: ctx.in_switch,
                     strict: fn_strict,
+                    allow_super: false,
                     iter_labels: ctx.iter_labels.clone(),
                     break_labels: ctx.break_labels.clone(),
                 };
@@ -249,10 +326,7 @@ fn check_expression(
             {
                 errors.push(EarlyError {
                     code: ErrorCode::EarlyStrictReserved,
-                    message: format!(
-                        "'{}' may not be updated in strict mode",
-                        identifier.name
-                    ),
+                    message: format!("'{}' may not be updated in strict mode", identifier.name),
                     span: identifier.span,
                 });
             }
@@ -283,6 +357,7 @@ fn check_expression(
                 check_expression(argument, scope, ctx, errors);
             }
         }
+        Expression::NewTarget(_) => {}
         Expression::Await(await_expression) => {
             check_expression(&await_expression.argument, scope, ctx, errors)
         }
@@ -297,6 +372,7 @@ fn check_script(script: &Script, errors: &mut Vec<EarlyError>) {
         in_iteration: false,
         in_switch: false,
         strict: script_strict,
+        allow_super: false,
         iter_labels: Vec::new(),
         break_labels: Vec::new(),
     };
@@ -352,30 +428,63 @@ fn check_statement(
         }
         Statement::FunctionDecl(f) => {
             scope.enter_function();
-            let fn_strict = ctx.strict
-                || (if let Statement::Block(b) = &*f.body {
-                    block_is_strict(&b.body)
-                } else {
-                    false
+            let body_has_use_strict = if let Statement::Block(b) = &*f.body {
+                block_is_strict(&b.body)
+            } else {
+                false
+            };
+            let fn_strict = ctx.strict || body_has_use_strict;
+            if f.is_async && body_has_use_strict && !is_simple_parameter_list(&f.params) {
+                errors.push(EarlyError {
+                    code: ErrorCode::EarlyStrictReserved,
+                    message: "strict function body cannot be used with non-simple parameter list"
+                        .to_string(),
+                    span: f.span,
                 });
+            }
+            if fn_strict && is_strict_reserved(&f.name) {
+                errors.push(EarlyError {
+                    code: ErrorCode::EarlyStrictReserved,
+                    message: format!(
+                        "'{}' may not be used as function name in strict mode",
+                        f.name
+                    ),
+                    span: f.span,
+                });
+            }
+            let top_level_lexicals = top_level_lexical_names(&f.body);
             for param in &f.params {
-                let name = param.name();
-                if fn_strict && is_strict_reserved(name) {
-                    errors.push(EarlyError {
-                        code: ErrorCode::EarlyStrictReserved,
-                        message: format!(
-                            "'{}' may not be used as parameter name in strict mode",
-                            name
-                        ),
-                        span: f.span,
-                    });
-                }
-                if let Some(prev) = scope.add_lexical(name, f.span) {
-                    errors.push(EarlyError {
-                        code: ErrorCode::EarlyDuplicateParam,
-                        message: format!("duplicate parameter name '{}'", name),
-                        span: prev,
-                    });
+                for name in param_binding_names(param) {
+                    if fn_strict && is_strict_reserved(&name) {
+                        errors.push(EarlyError {
+                            code: ErrorCode::EarlyStrictReserved,
+                            message: format!(
+                                "'{}' may not be used as parameter name in strict mode",
+                                name
+                            ),
+                            span: f.span,
+                        });
+                    }
+                    if top_level_lexicals
+                        .iter()
+                        .any(|lexical_name| lexical_name == &name)
+                    {
+                        errors.push(EarlyError {
+                            code: ErrorCode::EarlyDuplicateLexical,
+                            message: format!(
+                                "parameter '{}' conflicts with lexical declaration in function body",
+                                name
+                            ),
+                            span: f.span,
+                        });
+                    }
+                    if let Some(prev) = scope.add_lexical(&name, f.span) {
+                        errors.push(EarlyError {
+                            code: ErrorCode::EarlyDuplicateParam,
+                            message: format!("duplicate parameter name '{}'", name),
+                            span: prev,
+                        });
+                    }
                 }
             }
             let fn_ctx = CheckContext {
@@ -383,6 +492,7 @@ fn check_statement(
                 in_iteration: ctx.in_iteration,
                 in_switch: ctx.in_switch,
                 strict: fn_strict,
+                allow_super: false,
                 iter_labels: ctx.iter_labels.clone(),
                 break_labels: ctx.break_labels.clone(),
             };
@@ -536,6 +646,7 @@ fn check_statement(
                 in_iteration: true,
                 in_switch: ctx.in_switch,
                 strict: ctx.strict,
+                allow_super: ctx.allow_super,
                 iter_labels: ctx.iter_labels.clone(),
                 break_labels: ctx.break_labels.clone(),
             };
@@ -549,6 +660,7 @@ fn check_statement(
                 in_iteration: true,
                 in_switch: ctx.in_switch,
                 strict: ctx.strict,
+                allow_super: ctx.allow_super,
                 iter_labels: ctx.iter_labels.clone(),
                 break_labels: ctx.break_labels.clone(),
             };
@@ -571,6 +683,7 @@ fn check_statement(
                 in_iteration: true,
                 in_switch: ctx.in_switch,
                 strict: ctx.strict,
+                allow_super: ctx.allow_super,
                 iter_labels: ctx.iter_labels.clone(),
                 break_labels: ctx.break_labels.clone(),
             };
@@ -634,6 +747,7 @@ fn check_statement(
                 in_iteration: true,
                 in_switch: ctx.in_switch,
                 strict: ctx.strict,
+                allow_super: ctx.allow_super,
                 iter_labels: ctx.iter_labels.clone(),
                 break_labels: ctx.break_labels.clone(),
             };
@@ -697,6 +811,7 @@ fn check_statement(
                 in_iteration: true,
                 in_switch: ctx.in_switch,
                 strict: ctx.strict,
+                allow_super: ctx.allow_super,
                 iter_labels: ctx.iter_labels.clone(),
                 break_labels: ctx.break_labels.clone(),
             };
@@ -710,6 +825,7 @@ fn check_statement(
                 in_iteration: ctx.in_iteration,
                 in_switch: true,
                 strict: ctx.strict,
+                allow_super: ctx.allow_super,
                 iter_labels: ctx.iter_labels.clone(),
                 break_labels: ctx.break_labels.clone(),
             };
@@ -952,6 +1068,9 @@ mod tests {
         let r = parse_and_check("'use strict'; with ({}) {}");
         assert!(r.is_err());
         let errs = r.unwrap_err();
-        assert!(errs.iter().any(|e| e.message.contains("'with' is not allowed")));
+        assert!(
+            errs.iter()
+                .any(|e| e.message.contains("'with' is not allowed"))
+        );
     }
 }

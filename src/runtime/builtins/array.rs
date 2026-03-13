@@ -751,13 +751,37 @@ pub fn values(args: &[Value], heap: &mut Heap) -> Value {
         Some(Value::Array(id)) => *id,
         _ => return Value::Undefined,
     };
-    let elements = heap.array_elements(receiver).map(|e| e.to_vec());
-    let elements: Vec<Value> = elements.unwrap_or_default();
-    let new_id = heap.alloc_array();
-    for v in elements {
-        heap.array_push(new_id, v);
-    }
-    Value::Array(new_id)
+    let iterator_instance_prototype = match heap.get_global("Iterator") {
+        Value::Object(iterator_ctor_id) => {
+            match heap.get_prop(iterator_ctor_id, "__iterator_instance_prototype") {
+                Value::Object(prototype_id) => Some(prototype_id),
+                _ => match heap.get_prop(iterator_ctor_id, "prototype") {
+                    Value::Object(iterator_prototype_id) => {
+                        let instance_prototype_id =
+                            heap.alloc_object_with_prototype(Some(iterator_prototype_id));
+                        heap.set_prop(
+                            iterator_ctor_id,
+                            "__iterator_instance_prototype",
+                            Value::Object(instance_prototype_id),
+                        );
+                        Some(instance_prototype_id)
+                    }
+                    _ => None,
+                },
+            }
+        }
+        _ => None,
+    };
+    let iterator_object_id = heap.alloc_object_with_prototype(iterator_instance_prototype);
+    heap.set_prop(iterator_object_id, "__iter_arr", Value::Array(receiver));
+    heap.set_prop(iterator_object_id, "__iter_idx", Value::Int(0));
+    let next_id = super::resolve("Iterator", "arrayNext").expect("Iterator.arrayNext");
+    heap.set_prop(
+        iterator_object_id,
+        "next",
+        Value::BoundBuiltin(next_id, Box::new(Value::Object(iterator_object_id)), false),
+    );
+    Value::Object(iterator_object_id)
 }
 
 pub fn keys(args: &[Value], heap: &mut Heap) -> Value {

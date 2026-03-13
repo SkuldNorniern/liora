@@ -189,7 +189,10 @@ impl JitTiering {
 
     #[inline(always)]
     fn is_potentially_jittable(chunk: &BytecodeChunk) -> bool {
-        chunk.handlers.is_empty() && chunk.rest_param_index.is_none()
+        !chunk.is_async
+            && !chunk.is_generator
+            && chunk.handlers.is_empty()
+            && chunk.rest_param_index.is_none()
     }
 
     #[inline(always)]
@@ -256,9 +259,11 @@ mod tests {
         let program_chunks = vec![unsupported_chunk.clone()];
 
         for _ in 0..tiering.hot_call_threshold() {
-            assert!(tiering
-                .maybe_execute(0, &unsupported_chunk, &[], &program_chunks)
-                .is_none());
+            assert!(
+                tiering
+                    .maybe_execute(0, &unsupported_chunk, &[], &program_chunks)
+                    .is_none()
+            );
         }
 
         assert_eq!(tiering.chunk_states[0], ChunkTierState::Rejected);
@@ -267,6 +272,32 @@ mod tests {
             panic!("jit session should be initialized when tiering is enabled");
         };
         assert_eq!(session.compilation_attempt_count(), 1);
+    }
+
+    #[test]
+    fn rejects_async_chunks_before_compile_attempt() {
+        let mut tiering = JitTiering::new(1, true);
+        let async_chunk = BytecodeChunk {
+            code: vec![Opcode::PushConst as u8, 0, Opcode::Return as u8],
+            constants: vec![ConstEntry::Int(1)],
+            num_locals: 0,
+            named_locals: vec![],
+            mapped_arguments_slots: vec![],
+            captured_names: vec![],
+            rest_param_index: None,
+            handlers: vec![],
+            arguments_slot: None,
+            is_generator: false,
+            is_async: true,
+        };
+        let program_chunks = vec![async_chunk.clone()];
+
+        assert!(
+            tiering
+                .maybe_execute(0, &async_chunk, &[], &program_chunks)
+                .is_none()
+        );
+        assert_eq!(tiering.chunk_states[0], ChunkTierState::Rejected);
     }
 
     #[test]
@@ -288,9 +319,11 @@ mod tests {
         let program_chunks = vec![trivial_chunk.clone()];
 
         for _ in 0..(tiering.hot_call_threshold() - 1) {
-            assert!(tiering
-                .maybe_execute(0, &trivial_chunk, &[], &program_chunks)
-                .is_none());
+            assert!(
+                tiering
+                    .maybe_execute(0, &trivial_chunk, &[], &program_chunks)
+                    .is_none()
+            );
         }
 
         let compiled_result = tiering.maybe_execute(0, &trivial_chunk, &[], &program_chunks);

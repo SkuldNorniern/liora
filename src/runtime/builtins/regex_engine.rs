@@ -255,8 +255,12 @@ fn try_match_at(
                         if t == ti {
                             break;
                         }
-                        let (_, c) = text[ti..].char_indices().last().unwrap();
-                        t -= c.len_utf8();
+                        let previous_char_len = text[..t]
+                            .chars()
+                            .next_back()
+                            .map(|character| character.len_utf8())
+                            .unwrap_or(1);
+                        t = t.saturating_sub(previous_char_len);
                     }
                     return None;
                 }

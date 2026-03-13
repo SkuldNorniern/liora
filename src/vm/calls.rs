@@ -31,7 +31,7 @@ pub(crate) fn execute_builtin(
     stack: &mut Vec<Value>,
     ctx: &mut builtins::BuiltinContext,
 ) -> Result<BuiltinResult, VmError> {
-    if builtin_id > builtins::MAX_BUILTIN_ID {
+    if usize::from(builtin_id) > builtins::MAX_BUILTIN_ID {
         return Err(VmError::InvalidOpcode(builtin_id));
     }
     let result = if argc <= 16 {

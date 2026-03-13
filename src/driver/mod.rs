@@ -1,80 +1,16 @@
+mod error;
+
 use crate::backend::translate_to_lamina_ir;
 use crate::diagnostics::Diagnostic;
 use crate::diagnostics::ErrorCode;
 use crate::frontend::{Lexer, Parser, check_early_errors};
 use crate::host::{CliHost, HostHooks, with_host};
-use crate::ir::{hir_to_bytecode, script_to_hir};
+use crate::ir::{disassemble_compiled, lower_script};
 use crate::runtime::Value;
 use crate::vm::{Completion, Program};
 use std::sync::atomic::AtomicBool;
 
-#[derive(Debug)]
-pub enum DriverError {
-    Backend(crate::backend::BackendError),
-    Diagnostic {
-        diagnostics: Vec<Diagnostic>,
-        source: Option<String>,
-    },
-    Parse {
-        error: crate::frontend::ParseError,
-        source: Option<String>,
-    },
-    Lower(crate::ir::LowerError),
-}
-
-impl std::fmt::Display for DriverError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            DriverError::Backend(e) => write!(f, "{}", e),
-            DriverError::Diagnostic {
-                diagnostics,
-                source,
-            } => {
-                for d in diagnostics {
-                    write!(f, "{}", d.format(source.as_deref()))?;
-                }
-                Ok(())
-            }
-            DriverError::Parse { error, source } => {
-                let diagnostic = Diagnostic::error(error.code, error.message.clone(), error.span);
-                write!(f, "{}", diagnostic.format(source.as_deref()))
-            }
-            DriverError::Lower(e) => write!(f, "{}", e),
-        }
-    }
-}
-
-impl std::error::Error for DriverError {}
-
-impl From<crate::backend::BackendError> for DriverError {
-    fn from(e: crate::backend::BackendError) -> Self {
-        DriverError::Backend(e)
-    }
-}
-
-impl From<crate::frontend::ParseError> for DriverError {
-    fn from(e: crate::frontend::ParseError) -> Self {
-        DriverError::Parse {
-            error: e,
-            source: None,
-        }
-    }
-}
-
-impl From<crate::ir::LowerError> for DriverError {
-    fn from(e: crate::ir::LowerError) -> Self {
-        DriverError::Lower(e)
-    }
-}
-
-impl From<crate::vm::VmError> for DriverError {
-    fn from(e: crate::vm::VmError) -> Self {
-        DriverError::Diagnostic {
-            diagnostics: vec![crate::diagnostics::vm_error_to_diagnostic(&e)],
-            source: None,
-        }
-    }
-}
+pub use error::DriverError;
 
 pub struct Driver;
 
@@ -105,18 +41,8 @@ impl Driver {
 
     pub fn bc(source: &str) -> Result<String, DriverError> {
         let script = Self::ast(source)?;
-        let funcs = script_to_hir(&script)?;
-        let chunks: Vec<_> = funcs
-            .iter()
-            .map(|f| (f.name.clone(), hir_to_bytecode(f)))
-            .collect();
-        let mut out = String::new();
-        for (i, (name, cf)) in chunks.iter().enumerate() {
-            let label = name.as_deref().unwrap_or("<anonymous>");
-            out.push_str(&format!("=== chunk {} ({}) ===\n", i, label));
-            out.push_str(&crate::ir::disassemble(&cf.chunk));
-            out.push('\n');
-        }
+        let compiled = crate::ir::compile_script(&script)?;
+        let out = disassemble_compiled(&compiled);
         if out.is_empty() {
             return Err(DriverError::Diagnostic {
                 diagnostics: vec![Diagnostic::error(
@@ -259,7 +185,7 @@ impl Driver {
         compat_mode: bool,
     ) -> Result<Value, DriverError> {
         let script = Self::ast(source)?;
-        let funcs = script_to_hir(&script)?;
+        let funcs = lower_script(&script)?;
         let entry = funcs
             .iter()
             .position(|f| f.name.as_deref() == Some("main"))
@@ -271,7 +197,10 @@ impl Driver {
                 )],
                 source: Some(source.to_string()),
             })?;
-        let chunks: Vec<_> = funcs.iter().map(|f| hir_to_bytecode(f).chunk).collect();
+        let chunks: Vec<_> = crate::ir::compile_functions(&funcs)
+            .into_iter()
+            .map(|compiled| compiled.chunk)
+            .collect();
         let init_entry = funcs
             .iter()
             .position(|f| f.name.as_deref() == Some("__init__"));

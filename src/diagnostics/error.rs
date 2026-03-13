@@ -106,10 +106,7 @@ impl Diagnostic {
         let mut out = String::new();
 
         let (header_style, label_style) = match self.severity {
-            Severity::Error => (
-                Style::builder().foreground(Color::Red).bold().build(),
-                None,
-            ),
+            Severity::Error => (Style::builder().foreground(Color::Red).bold().build(), None),
             Severity::Warning => (
                 Style::builder().foreground(Color::Yellow).build(),
                 Some(Style::builder().foreground(Color::Yellow).bold().build()),
@@ -204,10 +201,7 @@ impl Diagnostic {
         let red_style = Style::builder().foreground(Color::Red).bold().build();
 
         let mut out = String::new();
-        let loc_line = format!(
-            "  --> {}:{}\n",
-            span.start.line, span.start.column
-        );
+        let loc_line = format!("  --> {}:{}\n", span.start.line, span.start.column);
         out.push_str(&loc_line.style(cyan_style).to_string());
         out.push_str(&format!("  {} |\n", " ".repeat(gutter_width)));
 

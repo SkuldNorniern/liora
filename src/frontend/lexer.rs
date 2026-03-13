@@ -105,7 +105,10 @@ impl Lexer<'_> {
     }
 
     fn is_identifier_part(ch: char) -> bool {
-        Self::is_identifier_start(ch) || ch.is_alphanumeric() || ch == '\u{200C}' || ch == '\u{200D}'
+        Self::is_identifier_start(ch)
+            || ch.is_alphanumeric()
+            || ch == '\u{200C}'
+            || ch == '\u{200D}'
     }
 
     fn consume_identifier_escape(&mut self) -> Option<char> {
@@ -147,11 +150,13 @@ impl Lexer<'_> {
     fn scan_identifier(&mut self) -> Token {
         let start_pos = self.position;
         let mut lexeme = String::new();
+        let mut had_escape = false;
 
         while let Some(ch) = self.current_char {
             if ch == '\\' {
                 if let Some(decoded) = self.consume_identifier_escape() {
                     lexeme.push(decoded);
+                    had_escape = true;
                     continue;
                 }
                 break;
@@ -165,7 +170,7 @@ impl Lexer<'_> {
         }
 
         let span = Span::from_text(start_pos, &lexeme);
-        let token_type = if self.keywords_trie.is_keyword(&lexeme) {
+        let token_type = if !had_escape && self.keywords_trie.is_keyword(&lexeme) {
             match lexeme.as_str() {
                 "break" => TokenType::Break,
                 "case" => TokenType::Case,
@@ -741,6 +746,14 @@ impl Lexer<'_> {
                     )
                 }
             }
+            '#' => {
+                self.advance();
+                Token::new(
+                    TokenType::Hash,
+                    "#".to_string(),
+                    Span::from_text(start_pos, "#"),
+                )
+            }
             '~' => {
                 self.advance();
                 Token::new(
@@ -977,7 +990,9 @@ mod tests {
         let regex_tokens: Vec<_> = tokens
             .iter()
             .filter_map(|token| match &token.token_type {
-                TokenType::RegExpLiteral { pattern, flags } => Some((pattern.clone(), flags.clone())),
+                TokenType::RegExpLiteral { pattern, flags } => {
+                    Some((pattern.clone(), flags.clone()))
+                }
                 _ => None,
             })
             .collect();
