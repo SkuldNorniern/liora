@@ -19,6 +19,28 @@ fn skip_ws(s: &str, i: &mut usize) {
     }
 }
 
+#[inline(always)]
+fn hex_nibble(byte: u8) -> Option<u16> {
+    match byte {
+        b'0'..=b'9' => Some((byte - b'0') as u16),
+        b'a'..=b'f' => Some((byte - b'a' + 10) as u16),
+        b'A'..=b'F' => Some((byte - b'A' + 10) as u16),
+        _ => None,
+    }
+}
+
+#[inline(always)]
+fn parse_u16_escape(bytes: &[u8], offset: usize) -> Option<u16> {
+    if offset + 4 > bytes.len() {
+        return None;
+    }
+    let b0 = hex_nibble(bytes[offset])?;
+    let b1 = hex_nibble(bytes[offset + 1])?;
+    let b2 = hex_nibble(bytes[offset + 2])?;
+    let b3 = hex_nibble(bytes[offset + 3])?;
+    Some((b0 << 12) | (b1 << 8) | (b2 << 4) | b3)
+}
+
 fn parse_string(s: &str, i: &mut usize) -> Result<String, JsonParseError> {
     let bytes = s.as_bytes();
     if *i >= bytes.len() || bytes[*i] != b'"' {
@@ -61,13 +83,49 @@ fn parse_string(s: &str, i: &mut usize) -> Result<String, JsonParseError> {
                             offset: *i,
                         });
                     }
-                    let hex: String = bytes[*i..*i + 4].iter().map(|&b| b as char).collect();
-                    *i += 4;
-                    let code = u32::from_str_radix(&hex, 16).map_err(|_| JsonParseError {
+                    let code_unit = parse_u16_escape(bytes, *i).ok_or_else(|| JsonParseError {
                         message: "invalid unicode escape".to_string(),
-                        offset: *i - 4,
+                        offset: *i,
                     })?;
-                    if let Some(ch) = char::from_u32(code) {
+                    *i += 4;
+
+                    if (0xD800..=0xDBFF).contains(&code_unit) {
+                        if *i + 6 > bytes.len() || bytes[*i] != b'\\' || bytes[*i + 1] != b'u' {
+                            return Err(JsonParseError {
+                                message: "invalid unicode surrogate pair".to_string(),
+                                offset: *i,
+                            });
+                        }
+                        *i += 2;
+                        let low_code_unit =
+                            parse_u16_escape(bytes, *i).ok_or_else(|| JsonParseError {
+                                message: "invalid unicode escape".to_string(),
+                                offset: *i,
+                            })?;
+                        *i += 4;
+                        if !(0xDC00..=0xDFFF).contains(&low_code_unit) {
+                            return Err(JsonParseError {
+                                message: "invalid unicode surrogate pair".to_string(),
+                                offset: *i - 4,
+                            });
+                        }
+                        let code_point = 0x10000u32
+                            + (((code_unit as u32 - 0xD800) << 10)
+                                | (low_code_unit as u32 - 0xDC00));
+                        if let Some(ch) = char::from_u32(code_point) {
+                            out.push(ch);
+                        } else {
+                            return Err(JsonParseError {
+                                message: "invalid unicode code point".to_string(),
+                                offset: *i - 10,
+                            });
+                        }
+                    } else if (0xDC00..=0xDFFF).contains(&code_unit) {
+                        return Err(JsonParseError {
+                            message: "invalid unicode code point".to_string(),
+                            offset: *i - 4,
+                        });
+                    } else if let Some(ch) = char::from_u32(code_unit as u32) {
                         out.push(ch);
                     } else {
                         return Err(JsonParseError {
@@ -83,14 +141,18 @@ fn parse_string(s: &str, i: &mut usize) -> Result<String, JsonParseError> {
                     });
                 }
             }
-        } else if b < 0x20 {
-            return Err(JsonParseError {
-                message: "unescaped control character".to_string(),
-                offset: *i,
-            });
         } else {
-            out.push(b as char);
-            *i += 1;
+            let Some(ch) = s[*i..].chars().next() else {
+                break;
+            };
+            if ch <= '\u{001F}' {
+                return Err(JsonParseError {
+                    message: "unescaped control character".to_string(),
+                    offset: *i,
+                });
+            }
+            out.push(ch);
+            *i += ch.len_utf8();
         }
     }
     Err(JsonParseError {
@@ -430,6 +492,28 @@ mod tests {
         let id = v.as_object_id().expect("object");
         assert_eq!(heap.get_prop(id, "a").to_i64(), 1);
         assert_eq!(heap.get_prop(id, "b").to_i64(), 2);
+    }
+
+    #[test]
+    fn json_parse_object_with_utf8_string() {
+        let mut heap = Heap::new();
+        let value = json_parse(r#"{"text":"h\u00e9llo ☕"}"#, &mut heap).expect("parse");
+        let object_id = value.as_object_id().expect("object");
+        assert_eq!(
+            heap.get_prop(object_id, "text"),
+            Value::String("héllo ☕".to_string())
+        );
+    }
+
+    #[test]
+    fn json_parse_surrogate_pair() {
+        let mut heap = Heap::new();
+        let value = json_parse(r#"{"emoji":"\ud83d\ude00"}"#, &mut heap).expect("parse");
+        let object_id = value.as_object_id().expect("object");
+        assert_eq!(
+            heap.get_prop(object_id, "emoji"),
+            Value::String("😀".to_string())
+        );
     }
 
     #[test]

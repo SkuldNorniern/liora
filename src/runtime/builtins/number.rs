@@ -1,99 +1,167 @@
 use super::{number_to_value, to_number, to_prop_key};
 use crate::runtime::{Heap, Value};
 
+#[inline(always)]
+fn number_arg_as_f64(value: Option<&Value>) -> Option<f64> {
+    match value {
+        Some(Value::Int(number)) => Some(*number as f64),
+        Some(Value::Number(number)) => Some(*number),
+        _ => None,
+    }
+}
+
 pub fn number(args: &[Value], _heap: &mut Heap) -> Value {
     let n = args.first().map(to_number).unwrap_or(f64::NAN);
     number_to_value(n)
 }
 
 pub fn parse_int(args: &[Value], _heap: &mut Heap) -> Value {
-    let s = args.first().map(to_prop_key).unwrap_or_default();
-    let radix = args.get(1).map(|v| to_number(v) as i32).unwrap_or(10);
-    let s = s.trim_start();
-    let (s, sign) = if s.starts_with('-') {
-        (&s[1..], -1)
-    } else if s.starts_with('+') {
-        (&s[1..], 1)
+    let input = args.first().map(to_prop_key).unwrap_or_default();
+    let input = input.trim_start();
+
+    let (input, sign) = if let Some(stripped) = input.strip_prefix('-') {
+        (stripped, -1.0)
+    } else if let Some(stripped) = input.strip_prefix('+') {
+        (stripped, 1.0)
     } else {
-        (s, 1)
+        (input, 1.0)
     };
-    let radix = if radix == 0 { 10 } else { radix.clamp(2, 36) };
-    let s = if s.len() >= 2 && s.starts_with("0x") && radix == 16 {
-        &s[2..]
-    } else if s.len() >= 2 && s.starts_with("0X") && radix == 16 {
-        &s[2..]
-    } else {
-        s
+
+    let mut radix = match args.get(1).map(to_number) {
+        Some(radix_value) if radix_value.is_finite() && radix_value != 0.0 => {
+            radix_value.trunc() as i32
+        }
+        _ => 0,
     };
-    let mut n: i64 = 0;
-    for c in s.chars() {
-        let d = match c {
-            '0'..='9' => c as u32 - '0' as u32,
-            'a'..='z' => c as u32 - 'a' as u32 + 10,
-            'A'..='Z' => c as u32 - 'A' as u32 + 10,
-            _ => break,
+
+    if radix != 0 && !(2..=36).contains(&radix) {
+        return Value::Number(f64::NAN);
+    }
+
+    let mut digits = input;
+    if (radix == 0 || radix == 16) && (digits.starts_with("0x") || digits.starts_with("0X")) {
+        radix = 16;
+        digits = &digits[2..];
+    }
+    if radix == 0 {
+        radix = 10;
+    }
+
+    let mut number = 0.0f64;
+    let mut consumed_digit = false;
+    for digit_char in digits.chars() {
+        let Some(digit) = digit_char.to_digit(36) else {
+            break;
         };
-        if d >= radix as u32 {
+        if digit >= radix as u32 {
             break;
         }
-        n = n.saturating_mul(radix as i64).saturating_add(d as i64);
+        consumed_digit = true;
+        number = number * (radix as f64) + digit as f64;
     }
-    number_to_value((n * sign) as f64)
+
+    if !consumed_digit {
+        return Value::Number(f64::NAN);
+    }
+
+    number_to_value(number * sign)
 }
 
-pub fn is_nan(args: &[Value], _heap: &mut Heap) -> Value {
+pub fn number_is_nan(args: &[Value], _heap: &mut Heap) -> Value {
+    let result = matches!(args.first(), Some(Value::Number(number)) if number.is_nan());
+    Value::Bool(result)
+}
+
+pub fn global_is_nan(args: &[Value], _heap: &mut Heap) -> Value {
     let n = args.first().map(to_number).unwrap_or(f64::NAN);
     Value::Bool(n.is_nan())
 }
 
-pub fn is_finite(args: &[Value], _heap: &mut Heap) -> Value {
+pub fn number_is_finite(args: &[Value], _heap: &mut Heap) -> Value {
+    let result = number_arg_as_f64(args.first()).is_some_and(f64::is_finite);
+    Value::Bool(result)
+}
+
+pub fn global_is_finite(args: &[Value], _heap: &mut Heap) -> Value {
     let n = args.first().map(to_number).unwrap_or(f64::NAN);
     Value::Bool(n.is_finite())
 }
 
 pub fn parse_float(args: &[Value], _heap: &mut Heap) -> Value {
-    let s = args.first().map(to_prop_key).unwrap_or_default();
-    let s = s.trim_start();
-    let chars: Vec<char> = s.chars().collect();
-    let mut i = 0;
-    if i < chars.len() && (chars[i] == '-' || chars[i] == '+') {
-        i += 1;
+    let input = args.first().map(to_prop_key).unwrap_or_default();
+    let input = input.trim_start();
+
+    if input.starts_with("-Infinity") {
+        return number_to_value(f64::NEG_INFINITY);
     }
-    while i < chars.len() && chars[i].is_ascii_digit() {
-        i += 1;
+    if input.starts_with("+Infinity") || input.starts_with("Infinity") {
+        return number_to_value(f64::INFINITY);
     }
-    if i < chars.len() && chars[i] == '.' {
-        i += 1;
-        while i < chars.len() && chars[i].is_ascii_digit() {
-            i += 1;
+
+    let bytes = input.as_bytes();
+    let mut index = 0usize;
+    if index < bytes.len() && (bytes[index] == b'+' || bytes[index] == b'-') {
+        index += 1;
+    }
+
+    let integer_start = index;
+    while index < bytes.len() && bytes[index].is_ascii_digit() {
+        index += 1;
+    }
+    let mut has_digits = index > integer_start;
+
+    if index < bytes.len() && bytes[index] == b'.' {
+        index += 1;
+        let fraction_start = index;
+        while index < bytes.len() && bytes[index].is_ascii_digit() {
+            index += 1;
+        }
+        has_digits |= index > fraction_start;
+    }
+
+    if !has_digits {
+        return Value::Number(f64::NAN);
+    }
+
+    let exponent_start = index;
+    if index < bytes.len() && (bytes[index] == b'e' || bytes[index] == b'E') {
+        let mut exponent_index = index + 1;
+        if exponent_index < bytes.len()
+            && (bytes[exponent_index] == b'+' || bytes[exponent_index] == b'-')
+        {
+            exponent_index += 1;
+        }
+        let exponent_digits_start = exponent_index;
+        while exponent_index < bytes.len() && bytes[exponent_index].is_ascii_digit() {
+            exponent_index += 1;
+        }
+        if exponent_index > exponent_digits_start {
+            index = exponent_index;
+        } else {
+            index = exponent_start;
         }
     }
-    if i < chars.len() && (chars[i] == 'e' || chars[i] == 'E') {
-        i += 1;
-        if i < chars.len() && (chars[i] == '-' || chars[i] == '+') {
-            i += 1;
-        }
-        while i < chars.len() && chars[i].is_ascii_digit() {
-            i += 1;
-        }
-    }
-    let buf: String = chars[..i].iter().collect();
-    let n: f64 = buf.parse().unwrap_or(f64::NAN);
-    number_to_value(n)
+
+    let parsed = input[..index].parse::<f64>().unwrap_or(f64::NAN);
+    number_to_value(parsed)
 }
 
 pub fn is_integer(args: &[Value], _heap: &mut Heap) -> Value {
-    let n = args.first().map(to_number).unwrap_or(f64::NAN);
-    let ok = n.is_finite() && n.fract() == 0.0;
-    Value::Bool(ok)
+    let Some(n) = number_arg_as_f64(args.first()) else {
+        return Value::Bool(false);
+    };
+    Value::Bool(n.is_finite() && n.fract() == 0.0)
 }
 
 pub fn is_safe_integer(args: &[Value], _heap: &mut Heap) -> Value {
-    let n = args.first().map(to_number).unwrap_or(f64::NAN);
-    let ok = n.is_finite()
-        && n.fract() == 0.0
-        && (-9007199254740991.0..=9007199254740991.0).contains(&n);
-    Value::Bool(ok)
+    let Some(n) = number_arg_as_f64(args.first()) else {
+        return Value::Bool(false);
+    };
+    Value::Bool(
+        n.is_finite()
+            && n.fract() == 0.0
+            && (-9007199254740991.0..=9007199254740991.0).contains(&n),
+    )
 }
 
 pub fn primitive_to_string(args: &[Value], _heap: &mut Heap) -> Value {
@@ -134,45 +202,108 @@ mod tests {
             is_integer(&[Value::Number(f64::INFINITY)], &mut heap),
             Value::Bool(false)
         );
+        assert_eq!(
+            is_integer(&[Value::String("1".to_string())], &mut heap),
+            Value::Bool(false)
+        );
     }
 
     #[test]
-    fn is_nan_returns_true_for_nan() {
+    fn number_is_nan_returns_true_for_nan_only() {
         let mut heap = Heap::new();
         assert_eq!(
-            is_nan(&[Value::Number(f64::NAN)], &mut heap),
+            number_is_nan(&[Value::Number(f64::NAN)], &mut heap),
             Value::Bool(true)
         );
-        assert_eq!(is_nan(&[Value::Undefined], &mut heap), Value::Bool(true));
-    }
-
-    #[test]
-    fn is_nan_returns_false_for_number() {
-        let mut heap = Heap::new();
-        assert_eq!(is_nan(&[Value::Number(1.0)], &mut heap), Value::Bool(false));
-        assert_eq!(is_nan(&[Value::Int(0)], &mut heap), Value::Bool(false));
-    }
-
-    #[test]
-    fn is_finite_returns_true_for_finite() {
-        let mut heap = Heap::new();
         assert_eq!(
-            is_finite(&[Value::Number(1.0)], &mut heap),
-            Value::Bool(true)
+            number_is_nan(&[Value::Undefined], &mut heap),
+            Value::Bool(false)
         );
-        assert_eq!(is_finite(&[Value::Int(0)], &mut heap), Value::Bool(true));
     }
 
     #[test]
-    fn is_finite_returns_false_for_nan_or_infinity() {
+    fn global_is_nan_coerces_values() {
         let mut heap = Heap::new();
         assert_eq!(
-            is_finite(&[Value::Number(f64::NAN)], &mut heap),
+            global_is_nan(&[Value::Number(1.0)], &mut heap),
             Value::Bool(false)
         );
         assert_eq!(
-            is_finite(&[Value::Number(f64::INFINITY)], &mut heap),
+            global_is_nan(&[Value::Int(0)], &mut heap),
             Value::Bool(false)
+        );
+        assert_eq!(
+            global_is_nan(&[Value::Undefined], &mut heap),
+            Value::Bool(true)
+        );
+    }
+
+    #[test]
+    fn number_is_finite_does_not_coerce() {
+        let mut heap = Heap::new();
+        assert_eq!(
+            number_is_finite(&[Value::Number(1.0)], &mut heap),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            number_is_finite(&[Value::Int(0)], &mut heap),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            number_is_finite(&[Value::String("1".to_string())], &mut heap),
+            Value::Bool(false)
+        );
+    }
+
+    #[test]
+    fn global_is_finite_coerces_values() {
+        let mut heap = Heap::new();
+        assert_eq!(
+            global_is_finite(&[Value::Number(f64::NAN)], &mut heap),
+            Value::Bool(false)
+        );
+        assert_eq!(
+            global_is_finite(&[Value::Number(f64::INFINITY)], &mut heap),
+            Value::Bool(false)
+        );
+        assert_eq!(
+            global_is_finite(&[Value::String("1".to_string())], &mut heap),
+            Value::Bool(true)
+        );
+    }
+
+    #[test]
+    fn parse_int_invalid_or_invalid_radix_returns_nan() {
+        let mut heap = Heap::new();
+        assert!(matches!(
+            parse_int(&[Value::String("foo".to_string())], &mut heap),
+            Value::Number(number) if number.is_nan()
+        ));
+        assert!(matches!(
+            parse_int(&[Value::String("10".to_string()), Value::Int(1)], &mut heap),
+            Value::Number(number) if number.is_nan()
+        ));
+    }
+
+    #[test]
+    fn parse_int_respects_hex_prefix_with_default_radix() {
+        let mut heap = Heap::new();
+        assert_eq!(
+            parse_int(&[Value::String("0x10".to_string())], &mut heap),
+            Value::Int(16)
+        );
+    }
+
+    #[test]
+    fn parse_float_handles_infinity_and_invalid_exponent_suffix() {
+        let mut heap = Heap::new();
+        assert_eq!(
+            parse_float(&[Value::String("Infinity".to_string())], &mut heap),
+            Value::Number(f64::INFINITY)
+        );
+        assert_eq!(
+            parse_float(&[Value::String("1e".to_string())], &mut heap),
+            Value::Int(1)
         );
     }
 }

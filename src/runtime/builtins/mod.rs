@@ -673,12 +673,12 @@ const BUILTINS: &[BuiltinDef] = &[
     BuiltinDef {
         category: "Number",
         name: "isFinite",
-        entry: BuiltinEntry::Normal(number::is_finite),
+        entry: BuiltinEntry::Normal(number::number_is_finite),
     },
     BuiltinDef {
         category: "Number",
         name: "isNaN",
-        entry: BuiltinEntry::Normal(number::is_nan),
+        entry: BuiltinEntry::Normal(number::number_is_nan),
     },
     BuiltinDef {
         category: "Number",
@@ -1301,12 +1301,12 @@ const BUILTINS: &[BuiltinDef] = &[
     BuiltinDef {
         category: "Global",
         name: "isNaN",
-        entry: BuiltinEntry::Normal(number::is_nan),
+        entry: BuiltinEntry::Normal(number::global_is_nan),
     },
     BuiltinDef {
         category: "Global",
         name: "isFinite",
-        entry: BuiltinEntry::Normal(number::is_finite),
+        entry: BuiltinEntry::Normal(number::global_is_finite),
     },
     BuiltinDef {
         category: "Global",

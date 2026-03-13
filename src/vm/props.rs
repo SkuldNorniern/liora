@@ -164,6 +164,9 @@ pub(crate) fn resolve_get_prop(
                 function_prototype_prop(key)
             }
         }
+        Value::BoundBuiltin(_, _, _) | Value::BoundFunction(_, _, _) => {
+            function_prototype_prop(key)
+        }
         Value::Builtin(id) => builtin_prop(*id, key, heap),
         Value::Generator(gen_id) => generator_prop(*gen_id, key),
         Value::Promise(promise_id) => promise_prop(*promise_id, key),

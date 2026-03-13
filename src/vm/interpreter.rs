@@ -4,7 +4,7 @@ use crate::ir::bytecode::{BytecodeChunk, ConstEntry};
 use crate::runtime::DynamicCapture;
 use crate::runtime::builtins;
 use crate::runtime::{Heap, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -530,6 +530,31 @@ pub fn interpret_program_with_heap(
 /// Cycle detection catches infinite loops; cancel supports wall-clock timeout.
 const CHECK_INTERVAL: u32 = 1024;
 const CYCLE_THRESHOLD: usize = 3;
+const MAX_CYCLE_PERIOD: usize = 4;
+
+#[inline(always)]
+fn has_repeating_cycle_hashes(hashes: &VecDeque<u64>) -> bool {
+    for cycle_period in 1..=MAX_CYCLE_PERIOD {
+        let required_samples = cycle_period * (CYCLE_THRESHOLD + 1);
+        if hashes.len() < required_samples {
+            continue;
+        }
+        let window_start = hashes.len() - required_samples;
+        let mut is_cycle = true;
+        for sample_offset in cycle_period..required_samples {
+            let current_hash = hashes[window_start + sample_offset];
+            let previous_hash = hashes[window_start + sample_offset - cycle_period];
+            if current_hash != previous_hash {
+                is_cycle = false;
+                break;
+            }
+        }
+        if is_cycle {
+            return true;
+        }
+    }
+    false
+}
 
 #[inline(always)]
 fn value_fingerprint(value: &Value) -> u64 {
@@ -595,17 +620,42 @@ fn hash_execution_state(
         .wrapping_mul(31)
         .wrapping_add(frames_len as u64);
 
-    if let Some(top) = stack.last() {
-        hash = hash.wrapping_mul(131).wrapping_add(value_fingerprint(top));
+    const LOCAL_SAMPLE_SIZE: usize = 16;
+    if num_locals <= LOCAL_SAMPLE_SIZE * 2 {
+        for local_offset in 0..num_locals {
+            let local_index = stack_base + local_offset;
+            if let Some(local_value) = stack.get(local_index) {
+                hash = hash
+                    .wrapping_mul(131)
+                    .wrapping_add(value_fingerprint(local_value));
+            }
+        }
+    } else {
+        for local_offset in 0..LOCAL_SAMPLE_SIZE {
+            let local_index = stack_base + local_offset;
+            if let Some(local_value) = stack.get(local_index) {
+                hash = hash
+                    .wrapping_mul(131)
+                    .wrapping_add(value_fingerprint(local_value));
+            }
+        }
+        let tail_start = num_locals.saturating_sub(LOCAL_SAMPLE_SIZE);
+        for local_offset in tail_start..num_locals {
+            let local_index = stack_base + local_offset;
+            if let Some(local_value) = stack.get(local_index) {
+                hash = hash
+                    .wrapping_mul(131)
+                    .wrapping_add(value_fingerprint(local_value));
+            }
+        }
     }
 
-    let local_count = num_locals.min(4);
-    for local_offset in 0..local_count {
-        let local_idx = stack_base + local_offset;
-        if let Some(local_value) = stack.get(local_idx) {
+    let operand_start = stack_base.saturating_add(num_locals);
+    if operand_start <= stack_len {
+        for operand_value in stack[operand_start..].iter().rev().take(8) {
             hash = hash
                 .wrapping_mul(131)
-                .wrapping_add(value_fingerprint(local_value));
+                .wrapping_add(value_fingerprint(operand_value));
         }
     }
 
@@ -673,8 +723,8 @@ pub fn interpret_program_with_heap_and_entry(
     };
 
     let mut loop_counter: u32 = 0;
-    let mut previous_cycle_hash: Option<u64> = None;
-    let mut repeated_cycle_count: usize = 0;
+    let mut recent_cycle_hashes: VecDeque<u64> =
+        VecDeque::with_capacity(MAX_CYCLE_PERIOD * (CYCLE_THRESHOLD + 1));
 
     loop {
         let frames_len = state.frames.len();
@@ -714,14 +764,13 @@ pub fn interpret_program_with_heap_and_entry(
                     stack_base,
                     num_locals,
                 );
-                if previous_cycle_hash == Some(h) {
-                    repeated_cycle_count += 1;
-                    if repeated_cycle_count >= CYCLE_THRESHOLD {
-                        return Err(VmError::InfiniteLoopDetected);
-                    }
-                } else {
-                    previous_cycle_hash = Some(h);
-                    repeated_cycle_count = 0;
+                recent_cycle_hashes.push_back(h);
+                let max_samples = MAX_CYCLE_PERIOD * (CYCLE_THRESHOLD + 1);
+                while recent_cycle_hashes.len() > max_samples {
+                    recent_cycle_hashes.pop_front();
+                }
+                if has_repeating_cycle_hashes(&recent_cycle_hashes) {
+                    return Err(VmError::InfiniteLoopDetected);
                 }
             }
         }
@@ -3288,5 +3337,17 @@ mod tests {
             "expected infinite loop detection, got: {}",
             err
         );
+    }
+
+    #[test]
+    fn interpret_finite_loop_with_detection_enabled() {
+        let result = crate::driver::Driver::run_with_timeout_and_cancel(
+            "function main() { let i = 0; while (i < 5000) { i = i + 1; } return i; }",
+            None,
+            true,
+            false,
+        )
+        .expect("finite loop should complete");
+        assert_eq!(result, 5000);
     }
 }

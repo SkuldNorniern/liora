@@ -146,12 +146,12 @@ pub fn function_bind(args: &[Value], ctx: &mut BuiltinContext) -> Result<Value, 
             Box::new(bound_this),
             bound_args,
         )),
-        Value::BoundFunction(inner_target, _inner_this, inner_args) => {
+        Value::BoundFunction(inner_target, inner_this, inner_args) => {
             let mut merged = inner_args.clone();
             merged.extend(bound_args);
             Ok(Value::BoundFunction(
                 inner_target.clone(),
-                Box::new(bound_this),
+                inner_this.clone(),
                 merged,
             ))
         }
@@ -244,5 +244,14 @@ mod tests {
             Err(BuiltinError::Throw(Value::String(msg)))
                 if msg.contains("target must be callable")
         ));
+    }
+
+    #[test]
+    fn bind_on_bound_function_keeps_original_this() {
+        let result = crate::driver::Driver::run(
+            "function main() { function add(a, b) { return this.base + a + b; } var first = add.bind({ base: 1 }, 2); var second = first.bind({ base: 100 }, 3); return second(); }",
+        )
+        .expect("run");
+        assert_eq!(result, 6);
     }
 }
