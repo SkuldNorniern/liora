@@ -71,6 +71,28 @@ fn parse_prefixed_integer(text: &str, radix: u32) -> Option<f64> {
     Some(number)
 }
 
+pub(crate) fn string_to_number(text: &str) -> f64 {
+    let text = text.trim();
+    if text.is_empty() {
+        return 0.0;
+    }
+    match text {
+        "Infinity" | "+Infinity" => return f64::INFINITY,
+        "-Infinity" => return f64::NEG_INFINITY,
+        _ => {}
+    }
+    if let Some(hex_digits) = text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")) {
+        return parse_prefixed_integer(hex_digits, 16).unwrap_or(f64::NAN);
+    }
+    if let Some(binary_digits) = text.strip_prefix("0b").or_else(|| text.strip_prefix("0B")) {
+        return parse_prefixed_integer(binary_digits, 2).unwrap_or(f64::NAN);
+    }
+    if let Some(octal_digits) = text.strip_prefix("0o").or_else(|| text.strip_prefix("0O")) {
+        return parse_prefixed_integer(octal_digits, 8).unwrap_or(f64::NAN);
+    }
+    text.parse().unwrap_or(f64::NAN)
+}
+
 pub(crate) fn to_number(v: &Value) -> f64 {
     match v {
         Value::Int(n) => *n as f64,
@@ -84,29 +106,7 @@ pub(crate) fn to_number(v: &Value) -> f64 {
         }
         Value::Null => 0.0,
         Value::Undefined => f64::NAN,
-        Value::String(s) => {
-            let text = s.trim();
-            if text.is_empty() {
-                return 0.0;
-            }
-            match text {
-                "Infinity" | "+Infinity" => return f64::INFINITY,
-                "-Infinity" => return f64::NEG_INFINITY,
-                _ => {}
-            }
-            if let Some(hex_digits) = text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")) {
-                return parse_prefixed_integer(hex_digits, 16).unwrap_or(f64::NAN);
-            }
-            if let Some(binary_digits) = text.strip_prefix("0b").or_else(|| text.strip_prefix("0B"))
-            {
-                return parse_prefixed_integer(binary_digits, 2).unwrap_or(f64::NAN);
-            }
-            if let Some(octal_digits) = text.strip_prefix("0o").or_else(|| text.strip_prefix("0O"))
-            {
-                return parse_prefixed_integer(octal_digits, 8).unwrap_or(f64::NAN);
-            }
-            text.parse().unwrap_or(f64::NAN)
-        }
+        Value::String(s) => string_to_number(s),
         Value::Symbol(_)
         | Value::BigInt(_)
         | Value::Object(_)
@@ -215,7 +215,12 @@ pub(crate) fn strict_eq(a: &Value, b: &Value) -> bool {
 }
 
 pub(crate) fn number_to_value(n: f64) -> Value {
-    if n.is_finite() && n.fract() == 0.0 && n >= i32::MIN as f64 && n <= i32::MAX as f64 {
+    if n.is_finite()
+        && n.fract() == 0.0
+        && n >= i32::MIN as f64
+        && n <= i32::MAX as f64
+        && !(n == 0.0 && n.is_sign_negative())
+    {
         Value::Int(n as i32)
     } else {
         Value::Number(n)

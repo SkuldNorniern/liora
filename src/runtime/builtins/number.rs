@@ -340,4 +340,13 @@ mod tests {
             Value::Number(number) if number.is_nan()
         ));
     }
+
+    #[test]
+    fn number_constructor_preserves_negative_zero() {
+        let mut heap = Heap::new();
+        let value = number(&[Value::String("-0".to_string())], &mut heap);
+        assert!(
+            matches!(value, Value::Number(number) if number == 0.0 && number.is_sign_negative())
+        );
+    }
 }

@@ -45,12 +45,12 @@ pub(crate) fn loose_eq(a: &Value, b: &Value) -> bool {
             if x.is_nan() {
                 false
             } else {
-                let yn: f64 = y.parse().unwrap_or(f64::NAN);
+                let yn = builtins::string_to_number(y);
                 *x == yn
             }
         }
         (Value::Int(x), Value::String(y)) | (Value::String(y), Value::Int(x)) => {
-            let yn: f64 = y.parse().unwrap_or(f64::NAN);
+            let yn = builtins::string_to_number(y);
             (*x as f64) == yn
         }
         (Value::String(x), Value::String(y)) => x == y,
@@ -474,5 +474,26 @@ fn get_constructor_name(constructor: &Value, heap: &Heap) -> Option<String> {
             None
         }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn loose_eq_uses_js_style_string_number_coercion() {
+        assert!(loose_eq(
+            &Value::Int(42),
+            &Value::String(" 42 ".to_string())
+        ));
+        assert!(loose_eq(
+            &Value::Int(16),
+            &Value::String("0x10".to_string())
+        ));
+        assert!(loose_eq(&Value::Int(3), &Value::String("0b11".to_string())));
+        assert!(loose_eq(&Value::Int(8), &Value::String("0o10".to_string())));
+        assert!(loose_eq(&Value::Int(0), &Value::String("".to_string())));
+        assert!(!loose_eq(&Value::Int(1), &Value::String("0x".to_string())));
     }
 }
