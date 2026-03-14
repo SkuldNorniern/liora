@@ -570,29 +570,10 @@ fn map_impl(args: &[Value], heap: &mut Heap) -> Value {
     Value::Array(new_id)
 }
 
-fn is_callable_value(value: &Value, heap: &Heap) -> bool {
-    match value {
-        Value::Function(_)
-        | Value::DynamicFunction(_)
-        | Value::Builtin(_)
-        | Value::BoundFunction(_, _, _)
-        | Value::BoundBuiltin(_, _, _) => true,
-        Value::Object(object_id) => matches!(
-            heap.get_prop(*object_id, "__call__"),
-            Value::Function(_)
-                | Value::DynamicFunction(_)
-                | Value::Builtin(_)
-                | Value::BoundFunction(_, _, _)
-                | Value::BoundBuiltin(_, _, _)
-        ),
-        _ => false,
-    }
-}
-
 pub fn map(args: &[Value], ctx: &mut BuiltinContext) -> Result<Value, BuiltinError> {
     let is_callable = args
         .get(1)
-        .is_some_and(|callback| is_callable_value(callback, ctx.heap));
+        .is_some_and(|callback| super::is_callable_value(callback, ctx.heap));
     if !is_callable {
         return Err(BuiltinError::Throw(Value::String(
             "TypeError: map callback must be a function".to_string(),

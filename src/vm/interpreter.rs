@@ -260,6 +260,202 @@ fn set_object_property_with_arguments_mapping(
 }
 
 #[inline(always)]
+fn promote_program_function_to_dynamic(
+    function_index: usize,
+    program: &Program,
+    heap: &mut Heap,
+    promoted_functions: &mut HashMap<usize, usize>,
+) -> Value {
+    if let Some(dynamic_index) = promoted_functions.get(&function_index) {
+        return Value::DynamicFunction(*dynamic_index);
+    }
+
+    let Some(function_chunk) = program.chunks.get(function_index) else {
+        return Value::Function(function_index);
+    };
+
+    let dynamic_index = heap.dynamic_chunks.len();
+    heap.dynamic_chunks.push(function_chunk.clone());
+    if heap.dynamic_captures.len() <= dynamic_index {
+        heap.dynamic_captures.resize(dynamic_index + 1, Vec::new());
+    }
+    heap.dynamic_captures[dynamic_index] = Vec::new();
+
+    for function_key in heap.function_keys(function_index) {
+        let function_value = heap.get_function_prop(function_index, &function_key);
+        heap.set_dynamic_function_prop(dynamic_index, &function_key, function_value);
+    }
+
+    promoted_functions.insert(function_index, dynamic_index);
+    Value::DynamicFunction(dynamic_index)
+}
+
+#[inline(always)]
+fn promote_eval_callable_value(
+    value: Value,
+    program: &Program,
+    heap: &mut Heap,
+    promoted_functions: &mut HashMap<usize, usize>,
+) -> Value {
+    match value {
+        Value::Function(function_index) => {
+            promote_program_function_to_dynamic(function_index, program, heap, promoted_functions)
+        }
+        Value::BoundFunction(target, bound_this, bound_args) => {
+            let promoted_target =
+                promote_eval_callable_value((*target).clone(), program, heap, promoted_functions);
+            if promoted_target == *target {
+                Value::BoundFunction(target, bound_this, bound_args)
+            } else {
+                Value::BoundFunction(Box::new(promoted_target), bound_this, bound_args)
+            }
+        }
+        _ => value,
+    }
+}
+
+#[inline(always)]
+fn promote_eval_callable_methods_on_object(
+    object_id: usize,
+    program: &Program,
+    heap: &mut Heap,
+    promoted_functions: &mut HashMap<usize, usize>,
+) {
+    for object_key in heap.object_keys(object_id) {
+        let property_value = heap.get_prop(object_id, &object_key);
+        let promoted_value =
+            promote_eval_callable_value(property_value.clone(), program, heap, promoted_functions);
+        if promoted_value != property_value {
+            heap.set_prop(object_id, &object_key, promoted_value);
+        }
+    }
+}
+
+#[inline(always)]
+fn prepare_eval_callable_globals(
+    program: &Program,
+    heap: &mut Heap,
+    promoted_functions: &mut HashMap<usize, usize>,
+) {
+    let global_object_id = heap.global_object();
+    for global_key in heap.object_keys(global_object_id) {
+        let global_value = heap.get_prop(global_object_id, &global_key);
+        let promoted_global_value =
+            promote_eval_callable_value(global_value.clone(), program, heap, promoted_functions);
+        if promoted_global_value != global_value {
+            heap.set_prop(global_object_id, &global_key, promoted_global_value.clone());
+        }
+
+        if (global_key == "assert" || global_key == "$262")
+            && let Value::Object(object_id) = promoted_global_value
+        {
+            promote_eval_callable_methods_on_object(object_id, program, heap, promoted_functions);
+        }
+    }
+}
+
+#[inline(always)]
+fn resolve_static_function_chunk<'a>(
+    program: &'a Program,
+    heap: &'a Heap,
+    function_index: usize,
+) -> Option<&'a BytecodeChunk> {
+    program
+        .chunks
+        .get(function_index)
+        .or_else(|| heap.eval_outer_chunk(function_index))
+}
+
+#[inline(always)]
+fn push_external_function_frame(
+    state: &mut RunState<'_>,
+    callee_chunk: BytecodeChunk,
+    function_index: usize,
+    args: &[Value],
+    this_value: Value,
+    new_object: Option<usize>,
+    heap: &mut Heap,
+) -> usize {
+    let chunk_is_async = callee_chunk.is_async;
+    let callee_locals = setup_callee_locals(
+        &callee_chunk,
+        args,
+        Some(Value::Function(function_index)),
+        heap,
+    );
+    let num_locals = callee_locals.len();
+    let stack_base = state.stack.len();
+    state.stack.extend(callee_locals);
+    state.chunks_stack.push(Rc::new(callee_chunk));
+    let frame_id = state.allocate_frame_id();
+    state.frames.push(Frame {
+        id: frame_id,
+        chunk_index: state.chunks_stack.len() - 1,
+        is_dynamic: true,
+        pc: 0,
+        stack_base,
+        num_locals,
+        this_value,
+        rethrow_after_finally: false,
+        new_object,
+        dynamic_function_id: None,
+        generator_id: None,
+        is_async: chunk_is_async,
+    });
+    frame_id
+}
+
+#[inline(always)]
+fn collect_eval_scope_bindings(
+    program: &Program,
+    state: &RunState<'_>,
+) -> (Vec<(String, Value)>, HashMap<String, usize>) {
+    let mut bindings_by_name: HashMap<String, (usize, Value)> = HashMap::new();
+    for frame in &state.frames {
+        let Ok(active_chunk) =
+            resolve_active_chunk(program, state, frame.chunk_index, frame.is_dynamic)
+        else {
+            continue;
+        };
+        let frame_chunk = active_chunk.as_chunk();
+        for (name, slot) in &frame_chunk.named_locals {
+            let slot_index = *slot as usize;
+            if slot_index >= frame.num_locals {
+                continue;
+            }
+            let absolute_slot = frame.stack_base + slot_index;
+            if let Some(value) = state.stack.get(absolute_slot) {
+                bindings_by_name.insert(name.clone(), (absolute_slot, value.clone()));
+            }
+        }
+    }
+
+    let mut bindings = Vec::with_capacity(bindings_by_name.len());
+    let mut writeback_targets = HashMap::with_capacity(bindings_by_name.len());
+    for (name, (slot, value)) in bindings_by_name {
+        writeback_targets.insert(name.clone(), slot);
+        bindings.push((name, value));
+    }
+    (bindings, writeback_targets)
+}
+
+#[inline(always)]
+fn sync_eval_scope_bindings_to_stack(
+    state: &mut RunState<'_>,
+    writeback_targets: &HashMap<String, usize>,
+    updated_bindings: Vec<(String, Value)>,
+) {
+    for (name, updated_value) in updated_bindings {
+        let Some(slot) = writeback_targets.get(&name) else {
+            continue;
+        };
+        if let Some(local_slot) = state.stack.get_mut(*slot) {
+            *local_slot = updated_value;
+        }
+    }
+}
+
+#[inline(always)]
 fn setup_static_function_locals(
     chunk: &BytecodeChunk,
     args: &[Value],
@@ -818,9 +1014,7 @@ pub fn interpret_program_with_heap_and_entry(
                 let val = match constants.get(idx).ok_or(VmError::InvalidConstIndex(idx))? {
                     ConstEntry::Global(name) => heap.get_global(name),
                     ConstEntry::Function(func_idx) => {
-                        let callee_chunk = program
-                            .chunks
-                            .get(*func_idx)
+                        let callee_chunk = resolve_static_function_chunk(program, heap, *func_idx)
                             .ok_or(VmError::InvalidConstIndex(*func_idx))?;
                         if callee_chunk.captured_names.is_empty() {
                             Value::Function(*func_idx)
@@ -883,9 +1077,7 @@ pub fn interpret_program_with_heap_and_entry(
                 let val = match constants.get(idx).ok_or(VmError::InvalidConstIndex(idx))? {
                     ConstEntry::Global(name) => heap.get_global(name),
                     ConstEntry::Function(func_idx) => {
-                        let callee_chunk = program
-                            .chunks
-                            .get(*func_idx)
+                        let callee_chunk = resolve_static_function_chunk(program, heap, *func_idx)
                             .ok_or(VmError::InvalidConstIndex(*func_idx))?;
                         if callee_chunk.captured_names.is_empty() {
                             Value::Function(*func_idx)
@@ -1381,55 +1573,67 @@ pub fn interpret_program_with_heap_and_entry(
                 let func_idx = read_u8(code, pc) as usize;
                 let argc = read_u8(code, pc + 1) as usize;
                 pc += 2;
-                let callee = program
-                    .chunks
-                    .get(func_idx)
-                    .ok_or(VmError::InvalidConstIndex(func_idx))?;
                 let args = pop_args(&mut state.stack, argc)?;
 
-                if callee.is_generator {
-                    let gen_id = create_generator_state_static(
-                        heap,
-                        callee,
+                if let Some(callee) = program.chunks.get(func_idx) {
+                    if callee.is_generator {
+                        let gen_id = create_generator_state_static(
+                            heap,
+                            callee,
+                            func_idx,
+                            &args,
+                            Value::Undefined,
+                        );
+                        state.stack.push(Value::Generator(gen_id));
+                        state.frames[frame_idx].pc = pc;
+                        continue;
+                    }
+
+                    if let Some(value) =
+                        state
+                            .tiering
+                            .maybe_execute(func_idx, callee, &args, &program.chunks)
+                    {
+                        state.stack.push(value);
+                        state.frames[frame_idx].pc = pc;
+                        continue;
+                    }
+
+                    let chunk_is_async = callee.is_async;
+                    let callee_locals = setup_static_function_locals(callee, &args, func_idx, heap);
+                    let num_locals = callee_locals.len();
+                    let stack_base = state.stack.len();
+                    state.stack.extend(callee_locals);
+                    let frame_id = state.allocate_frame_id();
+                    state.frames.push(Frame {
+                        id: frame_id,
+                        chunk_index: func_idx,
+                        is_dynamic: false,
+                        pc: 0,
+                        stack_base,
+                        num_locals,
+                        this_value: Value::Undefined,
+                        rethrow_after_finally: false,
+                        new_object: None,
+                        dynamic_function_id: None,
+                        generator_id: None,
+                        is_async: chunk_is_async,
+                    });
+                } else {
+                    let external_chunk = heap
+                        .eval_outer_chunk(func_idx)
+                        .cloned()
+                        .ok_or(VmError::InvalidConstIndex(func_idx))?;
+                    let _ = push_external_function_frame(
+                        &mut state,
+                        external_chunk,
                         func_idx,
                         &args,
                         Value::Undefined,
+                        None,
+                        heap,
                     );
-                    state.stack.push(Value::Generator(gen_id));
-                    state.frames[frame_idx].pc = pc;
-                    continue;
                 }
-
-                if let Some(value) =
-                    state
-                        .tiering
-                        .maybe_execute(func_idx, callee, &args, &program.chunks)
-                {
-                    state.stack.push(value);
-                    state.frames[frame_idx].pc = pc;
-                    continue;
-                }
-
-                let chunk_is_async = callee.is_async;
-                let callee_locals = setup_static_function_locals(callee, &args, func_idx, heap);
-                let num_locals = callee_locals.len();
-                let stack_base = state.stack.len();
-                state.stack.extend(callee_locals);
-                let frame_id = state.allocate_frame_id();
-                state.frames.push(Frame {
-                    id: frame_id,
-                    chunk_index: func_idx,
-                    is_dynamic: false,
-                    pc: 0,
-                    stack_base,
-                    num_locals,
-                    this_value: Value::Undefined,
-                    rethrow_after_finally: false,
-                    new_object: None,
-                    dynamic_function_id: None,
-                    generator_id: None,
-                    is_async: chunk_is_async,
-                });
             }
 
             // ---- CallBuiltin ----
@@ -1438,26 +1642,39 @@ pub fn interpret_program_with_heap_and_entry(
                 let argc = read_u8(code, pc + 1) as usize;
                 pc += 2;
                 let call_pc = trace_pc;
-                let mut has_eval_scope = false;
-                if builtins::category(builtin_id) == "Global"
-                    && builtins::name(builtin_id) == "eval"
-                {
-                    let mut eval_scope_bindings = Vec::with_capacity(chunk.named_locals.len());
-                    for (name, slot) in &chunk.named_locals {
-                        let slot_index = *slot as usize;
-                        if slot_index < num_locals
-                            && let Some(value) = state.stack.get(stack_base + slot_index)
-                        {
-                            eval_scope_bindings.push((name.clone(), value.clone()));
-                        }
+                let mut eval_scope_writeback_targets: Option<HashMap<String, usize>> = None;
+                let is_direct_eval_call = builtins::category(builtin_id) == "Global"
+                    && builtins::name(builtin_id) == "eval";
+                if is_direct_eval_call {
+                    let mut promoted_functions: HashMap<usize, usize> = HashMap::new();
+                    let (mut eval_scope_bindings, writeback_targets) =
+                        collect_eval_scope_bindings(program, &state);
+                    for (_, binding_value) in &mut eval_scope_bindings {
+                        *binding_value = promote_eval_callable_value(
+                            binding_value.clone(),
+                            program,
+                            heap,
+                            &mut promoted_functions,
+                        );
                     }
                     heap.set_eval_scope_bindings(eval_scope_bindings);
-                    has_eval_scope = true;
+                    prepare_eval_callable_globals(program, heap, &mut promoted_functions);
+                    heap.set_eval_outer_chunks(&program.chunks);
+                    eval_scope_writeback_targets = Some(writeback_targets);
                 }
                 let mut ctx = builtins::BuiltinContext { heap };
                 let builtin_result = execute_builtin(builtin_id, argc, &mut state.stack, &mut ctx);
-                if has_eval_scope {
+                if let Some(writeback_targets) = &eval_scope_writeback_targets {
+                    let updated_eval_bindings = heap.eval_scope_bindings();
+                    sync_eval_scope_bindings_to_stack(
+                        &mut state,
+                        writeback_targets,
+                        updated_eval_bindings,
+                    );
                     heap.clear_eval_scope_bindings();
+                }
+                if is_direct_eval_call {
+                    heap.clear_eval_outer_chunks();
                 }
                 match builtin_result {
                     Ok(BuiltinResult::Push(v)) => {
@@ -1655,55 +1872,66 @@ pub fn interpret_program_with_heap_and_entry(
                             Value::Undefined | Value::Null => Value::Object(heap.global_object()),
                             other => other,
                         };
-                        let callee_chunk = program
-                            .chunks
-                            .get(func_idx)
-                            .ok_or(VmError::InvalidConstIndex(func_idx))?;
+                        if let Some(callee_chunk) = program.chunks.get(func_idx) {
+                            if callee_chunk.is_generator {
+                                let gen_id = create_generator_state_static(
+                                    heap,
+                                    callee_chunk,
+                                    func_idx,
+                                    &args,
+                                    this_value.clone(),
+                                );
+                                state.stack.push(Value::Generator(gen_id));
+                                state.frames[frame_idx].pc = pc;
+                                continue;
+                            }
 
-                        if callee_chunk.is_generator {
-                            let gen_id = create_generator_state_static(
-                                heap,
+                            if let Some(value) = state.tiering.maybe_execute(
+                                func_idx,
                                 callee_chunk,
+                                &args,
+                                &program.chunks,
+                            ) {
+                                state.stack.push(value);
+                                state.frames[frame_idx].pc = pc;
+                                continue;
+                            }
+
+                            let chunk_is_async = callee_chunk.is_async;
+                            let callee_locals =
+                                setup_static_function_locals(callee_chunk, &args, func_idx, heap);
+                            let callee_stack_base = state.stack.len();
+                            state.stack.extend(callee_locals);
+                            let frame_id = state.allocate_frame_id();
+                            state.frames.push(Frame {
+                                id: frame_id,
+                                chunk_index: func_idx,
+                                is_dynamic: false,
+                                pc: 0,
+                                stack_base: callee_stack_base,
+                                num_locals: state.stack.len() - callee_stack_base,
+                                this_value: this_value.clone(),
+                                rethrow_after_finally: false,
+                                new_object: None,
+                                dynamic_function_id: None,
+                                generator_id: None,
+                                is_async: chunk_is_async,
+                            });
+                        } else {
+                            let external_chunk = heap
+                                .eval_outer_chunk(func_idx)
+                                .cloned()
+                                .ok_or(VmError::InvalidConstIndex(func_idx))?;
+                            let _ = push_external_function_frame(
+                                &mut state,
+                                external_chunk,
                                 func_idx,
                                 &args,
-                                this_value.clone(),
+                                this_value,
+                                None,
+                                heap,
                             );
-                            state.stack.push(Value::Generator(gen_id));
-                            state.frames[frame_idx].pc = pc;
-                            continue;
                         }
-
-                        if let Some(value) = state.tiering.maybe_execute(
-                            func_idx,
-                            callee_chunk,
-                            &args,
-                            &program.chunks,
-                        ) {
-                            state.stack.push(value);
-                            state.frames[frame_idx].pc = pc;
-                            continue;
-                        }
-
-                        let chunk_is_async = callee_chunk.is_async;
-                        let callee_locals =
-                            setup_static_function_locals(callee_chunk, &args, func_idx, heap);
-                        let callee_stack_base = state.stack.len();
-                        state.stack.extend(callee_locals);
-                        let frame_id = state.allocate_frame_id();
-                        state.frames.push(Frame {
-                            id: frame_id,
-                            chunk_index: func_idx,
-                            is_dynamic: false,
-                            pc: 0,
-                            stack_base: callee_stack_base,
-                            num_locals: state.stack.len() - callee_stack_base,
-                            this_value,
-                            rethrow_after_finally: false,
-                            new_object: None,
-                            dynamic_function_id: None,
-                            generator_id: None,
-                            is_async: chunk_is_async,
-                        });
                     }
                     Value::BoundFunction(target, bound_this, bound_args) => {
                         let mut merged = bound_args;
@@ -1856,31 +2084,43 @@ pub fn interpret_program_with_heap_and_entry(
                 let func_idx = read_u8(code, pc) as usize;
                 let argc = read_u8(code, pc + 1) as usize;
                 pc += 2;
-                let callee = program
-                    .chunks
-                    .get(func_idx)
-                    .ok_or(VmError::InvalidConstIndex(func_idx))?;
                 let prototype_id = heap.ensure_function_prototype(func_idx);
                 let obj_id = heap.alloc_object_with_prototype(Some(prototype_id));
                 let args = pop_args(&mut state.stack, argc)?;
-                let callee_locals = setup_static_function_locals(callee, &args, func_idx, heap);
-                let stack_base = state.stack.len();
-                state.stack.extend(callee_locals);
-                let frame_id = state.allocate_frame_id();
-                state.frames.push(Frame {
-                    id: frame_id,
-                    chunk_index: func_idx,
-                    is_dynamic: false,
-                    pc: 0,
-                    stack_base,
-                    num_locals: state.stack.len() - stack_base,
-                    this_value: Value::Object(obj_id),
-                    rethrow_after_finally: false,
-                    new_object: Some(obj_id),
-                    dynamic_function_id: None,
-                    generator_id: None,
-                    is_async: false,
-                });
+                if let Some(callee) = program.chunks.get(func_idx) {
+                    let callee_locals = setup_static_function_locals(callee, &args, func_idx, heap);
+                    let stack_base = state.stack.len();
+                    state.stack.extend(callee_locals);
+                    let frame_id = state.allocate_frame_id();
+                    state.frames.push(Frame {
+                        id: frame_id,
+                        chunk_index: func_idx,
+                        is_dynamic: false,
+                        pc: 0,
+                        stack_base,
+                        num_locals: state.stack.len() - stack_base,
+                        this_value: Value::Object(obj_id),
+                        rethrow_after_finally: false,
+                        new_object: Some(obj_id),
+                        dynamic_function_id: None,
+                        generator_id: None,
+                        is_async: false,
+                    });
+                } else {
+                    let external_chunk = heap
+                        .eval_outer_chunk(func_idx)
+                        .cloned()
+                        .ok_or(VmError::InvalidConstIndex(func_idx))?;
+                    let _ = push_external_function_frame(
+                        &mut state,
+                        external_chunk,
+                        func_idx,
+                        &args,
+                        Value::Object(obj_id),
+                        Some(obj_id),
+                        heap,
+                    );
+                }
             }
 
             // ---- NewMethod (dynamic target) ----
@@ -1987,29 +2227,41 @@ pub fn interpret_program_with_heap_and_entry(
                         });
                     }
                     Value::Function(func_idx) => {
-                        let callee_chunk = program
-                            .chunks
-                            .get(func_idx)
-                            .ok_or(VmError::InvalidConstIndex(func_idx))?;
-                        let callee_locals =
-                            setup_static_function_locals(callee_chunk, &args, func_idx, heap);
-                        let stack_base = state.stack.len();
-                        state.stack.extend(callee_locals);
-                        let frame_id = state.allocate_frame_id();
-                        state.frames.push(Frame {
-                            id: frame_id,
-                            chunk_index: func_idx,
-                            is_dynamic: false,
-                            pc: 0,
-                            stack_base,
-                            num_locals: state.stack.len() - stack_base,
-                            this_value: receiver,
-                            rethrow_after_finally: false,
-                            new_object: Some(obj_id),
-                            dynamic_function_id: None,
-                            generator_id: None,
-                            is_async: false,
-                        });
+                        if let Some(callee_chunk) = program.chunks.get(func_idx) {
+                            let callee_locals =
+                                setup_static_function_locals(callee_chunk, &args, func_idx, heap);
+                            let stack_base = state.stack.len();
+                            state.stack.extend(callee_locals);
+                            let frame_id = state.allocate_frame_id();
+                            state.frames.push(Frame {
+                                id: frame_id,
+                                chunk_index: func_idx,
+                                is_dynamic: false,
+                                pc: 0,
+                                stack_base,
+                                num_locals: state.stack.len() - stack_base,
+                                this_value: receiver.clone(),
+                                rethrow_after_finally: false,
+                                new_object: Some(obj_id),
+                                dynamic_function_id: None,
+                                generator_id: None,
+                                is_async: false,
+                            });
+                        } else {
+                            let external_chunk = heap
+                                .eval_outer_chunk(func_idx)
+                                .cloned()
+                                .ok_or(VmError::InvalidConstIndex(func_idx))?;
+                            let _ = push_external_function_frame(
+                                &mut state,
+                                external_chunk,
+                                func_idx,
+                                &args,
+                                receiver,
+                                Some(obj_id),
+                                heap,
+                            );
+                        }
                     }
                     Value::BoundFunction(target, _bound_this, bound_args) => {
                         let mut merged = bound_args;
@@ -2708,75 +2960,94 @@ fn handle_apply_invoke(
                 return Ok(None);
             }
             Value::Function(func_idx) => {
-                let callee_chunk = program
-                    .chunks
-                    .get(*func_idx)
-                    .ok_or(VmError::InvalidConstIndex(*func_idx))?;
+                if let Some(callee_chunk) = program.chunks.get(*func_idx) {
+                    if callee_chunk.is_generator {
+                        let gen_id = create_generator_state_static(
+                            heap,
+                            callee_chunk,
+                            *func_idx,
+                            &args,
+                            this_arg.clone(),
+                        );
+                        state.stack.push(Value::Generator(gen_id));
+                        return Ok(None);
+                    }
 
-                if callee_chunk.is_generator {
-                    let gen_id = create_generator_state_static(
-                        heap,
-                        callee_chunk,
-                        *func_idx,
-                        &args,
-                        this_arg.clone(),
-                    );
-                    state.stack.push(Value::Generator(gen_id));
-                    return Ok(None);
-                }
+                    if promise_chain_target.is_none()
+                        && let Some(value) = state.tiering.maybe_execute(
+                            *func_idx,
+                            callee_chunk,
+                            &args,
+                            &program.chunks,
+                        )
+                    {
+                        state.stack.push(value);
+                        return Ok(None);
+                    }
 
-                if promise_chain_target.is_none()
-                    && let Some(value) =
-                        state
-                            .tiering
-                            .maybe_execute(*func_idx, callee_chunk, &args, &program.chunks)
-                {
-                    state.stack.push(value);
-                    return Ok(None);
-                }
-
-                let chunk_is_async = callee_chunk.is_async;
-                let mut callee_locals =
-                    setup_static_function_locals(callee_chunk, &args, *func_idx, heap);
-                if callee_chunk
-                    .captured_names
-                    .iter()
-                    .any(|captured_name| captured_name == "__super__")
-                    && let Some(caller_frame) = state.frames.last()
-                    && let Some((_, caller_super_slot)) = current_chunk
-                        .named_locals
+                    let chunk_is_async = callee_chunk.is_async;
+                    let mut callee_locals =
+                        setup_static_function_locals(callee_chunk, &args, *func_idx, heap);
+                    if callee_chunk
+                        .captured_names
                         .iter()
-                        .find(|(name, _)| name == "__super__")
-                    && let Some((_, callee_super_slot)) = callee_chunk
-                        .named_locals
-                        .iter()
-                        .find(|(name, _)| name == "__super__")
-                {
-                    let caller_index = caller_frame.stack_base + *caller_super_slot as usize;
-                    if let Some(super_value) = state.stack.get(caller_index).cloned() {
-                        let callee_slot = *callee_super_slot as usize;
-                        if callee_slot < callee_locals.len() {
-                            callee_locals[callee_slot] = super_value;
+                        .any(|captured_name| captured_name == "__super__")
+                        && let Some(caller_frame) = state.frames.last()
+                        && let Some((_, caller_super_slot)) = current_chunk
+                            .named_locals
+                            .iter()
+                            .find(|(name, _)| name == "__super__")
+                        && let Some((_, callee_super_slot)) = callee_chunk
+                            .named_locals
+                            .iter()
+                            .find(|(name, _)| name == "__super__")
+                    {
+                        let caller_index = caller_frame.stack_base + *caller_super_slot as usize;
+                        if let Some(super_value) = state.stack.get(caller_index).cloned() {
+                            let callee_slot = *callee_super_slot as usize;
+                            if callee_slot < callee_locals.len() {
+                                callee_locals[callee_slot] = super_value;
+                            }
                         }
                     }
+                    let stack_base = state.stack.len();
+                    state.stack.extend(callee_locals);
+                    let frame_id = state.allocate_frame_id();
+                    state.frames.push(Frame {
+                        id: frame_id,
+                        chunk_index: *func_idx,
+                        is_dynamic: false,
+                        pc: 0,
+                        stack_base,
+                        num_locals: state.stack.len() - stack_base,
+                        this_value: this_arg,
+                        rethrow_after_finally: false,
+                        new_object,
+                        dynamic_function_id: None,
+                        generator_id: None,
+                        is_async: chunk_is_async,
+                    });
+                    if let Some(target_promise_id) = promise_chain_target {
+                        state
+                            .promise_chain_targets
+                            .insert(frame_id, target_promise_id);
+                    }
+                    return Ok(None);
                 }
-                let stack_base = state.stack.len();
-                state.stack.extend(callee_locals);
-                let frame_id = state.allocate_frame_id();
-                state.frames.push(Frame {
-                    id: frame_id,
-                    chunk_index: *func_idx,
-                    is_dynamic: false,
-                    pc: 0,
-                    stack_base,
-                    num_locals: state.stack.len() - stack_base,
-                    this_value: this_arg,
-                    rethrow_after_finally: false,
+
+                let external_chunk = heap
+                    .eval_outer_chunk(*func_idx)
+                    .cloned()
+                    .ok_or(VmError::InvalidConstIndex(*func_idx))?;
+                let frame_id = push_external_function_frame(
+                    state,
+                    external_chunk,
+                    *func_idx,
+                    &args,
+                    this_arg,
                     new_object,
-                    dynamic_function_id: None,
-                    generator_id: None,
-                    is_async: chunk_is_async,
-                });
+                    heap,
+                );
                 if let Some(target_promise_id) = promise_chain_target {
                     state
                         .promise_chain_targets

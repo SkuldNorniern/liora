@@ -1,4 +1,5 @@
 use super::Heap;
+use crate::ir::bytecode::BytecodeChunk;
 use crate::runtime::Value;
 use std::collections::HashMap;
 
@@ -13,6 +14,18 @@ impl Heap {
 
     pub fn eval_scope_bindings(&self) -> Vec<(String, Value)> {
         self.eval_scope_bindings.clone()
+    }
+
+    pub fn set_eval_outer_chunks(&mut self, chunks: &[BytecodeChunk]) {
+        self.eval_outer_chunks = chunks.to_vec();
+    }
+
+    pub fn clear_eval_outer_chunks(&mut self) {
+        self.eval_outer_chunks.clear();
+    }
+
+    pub fn eval_outer_chunk(&self, function_index: usize) -> Option<&BytecodeChunk> {
+        self.eval_outer_chunks.get(function_index)
     }
 
     pub fn get_function_prop(&self, func_index: usize, key: &str) -> Value {

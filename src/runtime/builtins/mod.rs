@@ -71,7 +71,7 @@ fn parse_prefixed_integer(text: &str, radix: u32) -> Option<f64> {
     Some(number)
 }
 
-pub(crate) fn string_to_number(text: &str) -> f64 {
+pub fn string_to_number(text: &str) -> f64 {
     let text = text.trim();
     if text.is_empty() {
         return 0.0;
@@ -91,6 +91,34 @@ pub(crate) fn string_to_number(text: &str) -> f64 {
         return parse_prefixed_integer(octal_digits, 8).unwrap_or(f64::NAN);
     }
     text.parse().unwrap_or(f64::NAN)
+}
+
+pub fn is_callable_value(value: &Value, heap: &Heap) -> bool {
+    match value {
+        Value::Function(_)
+        | Value::DynamicFunction(_)
+        | Value::Builtin(_)
+        | Value::BoundBuiltin(_, _, _)
+        | Value::BoundFunction(_, _, _) => true,
+        Value::Object(object_id) => matches!(
+            heap.get_prop(*object_id, "__call__"),
+            Value::Function(_)
+                | Value::DynamicFunction(_)
+                | Value::Builtin(_)
+                | Value::BoundBuiltin(_, _, _)
+                | Value::BoundFunction(_, _, _)
+        ),
+        _ => false,
+    }
+}
+
+pub fn to_length(value: &Value) -> usize {
+    const MAX_SAFE_LENGTH: f64 = 9007199254740991.0;
+    let number = to_number(value);
+    if !number.is_finite() || number <= 0.0 {
+        return 0;
+    }
+    number.floor().min(MAX_SAFE_LENGTH).min(usize::MAX as f64) as usize
 }
 
 pub(crate) fn to_number(v: &Value) -> f64 {
@@ -1502,6 +1530,11 @@ const BUILTINS: &[BuiltinDef] = &[
         category: "Function",
         name: "apply",
         entry: BuiltinEntry::Throwing(function_proto::function_apply),
+    },
+    BuiltinDef {
+        category: "Function",
+        name: "toString",
+        entry: BuiltinEntry::Throwing(function_proto::function_to_string),
     },
     BuiltinDef {
         category: "Function",

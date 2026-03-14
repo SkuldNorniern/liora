@@ -1675,7 +1675,7 @@ fn compile_statement(stmt: &Statement, ctx: &mut LowerCtx<'_>) -> Result<bool, L
             let mut block_func_index = get_func_index(ctx).clone();
             let mut hit_return = false;
             let mut taken_functions = ctx.functions.take();
-            let mut preallocated_block_functions: Vec<(u32, usize)> = Vec::new();
+            let mut preallocated_block_functions: Vec<(&FunctionDeclStmt, u32, usize)> = Vec::new();
 
             if let Some(functions) = taken_functions.as_mut() {
                 for statement in &b.body {
@@ -1692,49 +1692,49 @@ fn compile_statement(stmt: &Statement, ctx: &mut LowerCtx<'_>) -> Result<bool, L
                                 ctx.next_slot += 1;
                                 slot
                             });
-                        preallocated_block_functions.push((function_index, placeholder_index));
+                        preallocated_block_functions.push((
+                            nested_function,
+                            function_index,
+                            placeholder_index,
+                        ));
                     }
                 }
             }
 
-            let mut preallocated_function_cursor = 0usize;
-            for s in &b.body {
-                if let Statement::FunctionDecl(nested) = s {
-                    let outer_binding_names: Vec<String> = ctx.locals.keys().cloned().collect();
-                    if let Some(functions) = taken_functions.as_mut()
-                        && let Some((function_index, placeholder_index)) =
-                            preallocated_block_functions
-                                .get(preallocated_function_cursor)
-                                .copied()
-                    {
-                        preallocated_function_cursor += 1;
-                        let hir = compile_function(
-                            nested,
-                            &block_func_index,
-                            ctx.func_expr_map,
-                            Some(functions),
-                            ctx.functions_base,
-                            Some(outer_binding_names),
-                            Some(ctx.with_binding_names.clone()),
-                            ctx.strict,
-                        )?;
-                        let nested_captures: Vec<String> = hir.captured_names.clone();
-                        functions[placeholder_index] = hir;
-                        for captured in nested_captures {
-                            if !ctx.locals.contains_key(&captured) {
-                                get_or_alloc_capture_slot(ctx, &captured);
-                            }
+            for (nested, function_index, placeholder_index) in &preallocated_block_functions {
+                let outer_binding_names: Vec<String> = ctx.locals.keys().cloned().collect();
+                if let Some(functions) = taken_functions.as_mut() {
+                    let hir = compile_function(
+                        nested,
+                        &block_func_index,
+                        ctx.func_expr_map,
+                        Some(functions),
+                        ctx.functions_base,
+                        Some(outer_binding_names),
+                        Some(ctx.with_binding_names.clone()),
+                        ctx.strict,
+                    )?;
+                    let nested_captures: Vec<String> = hir.captured_names.clone();
+                    functions[*placeholder_index] = hir;
+                    for captured in nested_captures {
+                        if !ctx.locals.contains_key(&captured) {
+                            get_or_alloc_capture_slot(ctx, &captured);
                         }
-                        let slot = ctx.locals[&nested.name];
-                        ctx.blocks[ctx.current_block].ops.push(HirOp::LoadConst {
-                            value: HirConst::Function(function_index),
-                            span: nested.span,
-                        });
-                        ctx.blocks[ctx.current_block].ops.push(HirOp::StoreLocal {
-                            id: slot,
-                            span: nested.span,
-                        });
                     }
+                    let slot = ctx.locals[&nested.name];
+                    ctx.blocks[ctx.current_block].ops.push(HirOp::LoadConst {
+                        value: HirConst::Function(*function_index),
+                        span: nested.span,
+                    });
+                    ctx.blocks[ctx.current_block].ops.push(HirOp::StoreLocal {
+                        id: slot,
+                        span: nested.span,
+                    });
+                }
+            }
+
+            for s in &b.body {
+                if let Statement::FunctionDecl(_) = s {
                     continue;
                 }
                 let prev = ctx.block_func_index.take();

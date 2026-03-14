@@ -1,20 +1,18 @@
 //! Reflect builtin stubs for test262. apply throws; get/construct implement [[Get]]/[[Construct]].
 
-use super::{BuiltinContext, BuiltinError, error, to_prop_key_with_heap};
+use super::{
+    BuiltinContext, BuiltinError, error, is_callable_value, to_length, to_prop_key_with_heap,
+};
 use crate::runtime::Value;
 
-fn array_like_to_values(arr: &Value, heap: &crate::runtime::Heap) -> Vec<Value> {
+fn array_like_to_values(arr: &Value, heap: &crate::runtime::Heap) -> Option<Vec<Value>> {
     let len = match arr {
         Value::Array(id) => heap.array_len(*id),
         Value::Object(id) => {
             let len_val = heap.get_prop(*id, "length");
-            let n = super::to_number(&len_val);
-            if !n.is_finite() || n < 0.0 {
-                return vec![];
-            }
-            n as usize
+            to_length(&len_val)
         }
-        _ => return vec![],
+        _ => return None,
     };
     let mut out = Vec::with_capacity(len);
     for i in 0..len {
@@ -26,7 +24,7 @@ fn array_like_to_values(arr: &Value, heap: &crate::runtime::Heap) -> Vec<Value> 
         };
         out.push(val);
     }
-    out
+    Some(out)
 }
 
 fn builtin_prop_value(id: u8, key: &str) -> Option<Value> {
@@ -130,15 +128,7 @@ pub fn reflect_apply(args: &[Value], ctx: &mut BuiltinContext) -> Result<Value, 
     let target = a[0].clone();
     let this_arg = a[1].clone();
     let args_array = a[2].clone();
-    let is_callable = matches!(
-        &target,
-        Value::Function(_)
-            | Value::DynamicFunction(_)
-            | Value::Builtin(_)
-            | Value::BoundBuiltin(_, _, _)
-            | Value::BoundFunction(_, _, _)
-            | Value::Object(_)
-    );
+    let is_callable = is_callable_value(&target, ctx.heap);
     if !is_callable {
         return Err(BuiltinError::Throw(error::type_error(
             &[Value::String(
@@ -147,11 +137,14 @@ pub fn reflect_apply(args: &[Value], ctx: &mut BuiltinContext) -> Result<Value, 
             ctx.heap,
         )));
     }
-    let apply_args = if matches!(&args_array, Value::Null | Value::Undefined) {
-        vec![]
-    } else {
-        array_like_to_values(&args_array, ctx.heap)
-    };
+    let apply_args = array_like_to_values(&args_array, ctx.heap).ok_or_else(|| {
+        BuiltinError::Throw(error::type_error(
+            &[Value::String(
+                "Reflect.apply: argumentsList must be an object".to_string(),
+            )],
+            ctx.heap,
+        ))
+    })?;
     Err(BuiltinError::Invoke {
         callee: target,
         this_arg,
@@ -171,11 +164,14 @@ pub fn reflect_construct(args: &[Value], ctx: &mut BuiltinContext) -> Result<Val
         ))
     })?;
     let args_array = a.get(1).cloned().unwrap_or(Value::Undefined);
-    let construct_args = if matches!(args_array, Value::Null | Value::Undefined) {
-        vec![]
-    } else {
-        array_like_to_values(&args_array, ctx.heap)
-    };
+    let construct_args = array_like_to_values(&args_array, ctx.heap).ok_or_else(|| {
+        BuiltinError::Throw(error::type_error(
+            &[Value::String(
+                "Reflect.construct: argumentsList must be an object".to_string(),
+            )],
+            ctx.heap,
+        ))
+    })?;
     let new_object = ctx.heap.alloc_object();
     let new_obj_value = Value::Object(new_object);
     match target {
@@ -421,6 +417,28 @@ mod tests {
     }
 
     #[test]
+    fn reflect_apply_rejects_non_callable_object_target() {
+        let mut heap = Heap::new();
+        let target = Value::Object(heap.alloc_object());
+        let args_array = heap.alloc_array();
+        let mut ctx = BuiltinContext { heap: &mut heap };
+        let args = [target, Value::Undefined, Value::Array(args_array)];
+        let result = reflect_apply(&args, &mut ctx);
+        assert!(matches!(result, Err(BuiltinError::Throw(_))));
+    }
+
+    #[test]
+    fn reflect_apply_rejects_non_object_arguments_list() {
+        let mut heap = Heap::new();
+        let builtin_id =
+            crate::runtime::builtins::resolve("Array", "isArray").expect("isArray builtin");
+        let mut ctx = BuiltinContext { heap: &mut heap };
+        let args = [Value::Builtin(builtin_id), Value::Undefined, Value::Int(1)];
+        let result = reflect_apply(&args, &mut ctx);
+        assert!(matches!(result, Err(BuiltinError::Throw(_))));
+    }
+
+    #[test]
     fn reflect_get_returns_property() {
         let mut heap = Heap::new();
         let obj_id = heap.alloc_object();
@@ -458,5 +476,15 @@ mod tests {
             let msg = heap.get_prop(id, "message");
             assert!(matches!(msg, Value::String(s) if s == "test message"));
         }
+    }
+
+    #[test]
+    fn reflect_construct_rejects_non_object_arguments_list() {
+        let mut heap = Heap::new();
+        let error_ctor = heap.get_global("Error");
+        let mut ctx = BuiltinContext { heap: &mut heap };
+        let args = [error_ctor, Value::Undefined];
+        let result = reflect_construct(&args, &mut ctx);
+        assert!(matches!(result, Err(BuiltinError::Throw(_))));
     }
 }

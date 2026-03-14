@@ -199,6 +199,7 @@ fn function_prototype_prop(key: &str) -> Value {
         "bind" => Value::Builtin(b("Function", "bind")),
         "call" => Value::Builtin(b("Function", "call")),
         "apply" => Value::Builtin(b("Function", "apply")),
+        "toString" => Value::Builtin(b("Function", "toString")),
         _ => Value::Undefined,
     }
 }
@@ -216,6 +217,7 @@ fn builtin_prop(id: u8, key: &str, heap: &Heap) -> Value {
         "call" => Value::Builtin(b("Function", "call")),
         "bind" => Value::Builtin(b("Function", "bind")),
         "apply" => Value::Builtin(b("Function", "apply")),
+        "toString" => Value::Builtin(b("Function", "toString")),
         _ => Value::Undefined,
     }
 }

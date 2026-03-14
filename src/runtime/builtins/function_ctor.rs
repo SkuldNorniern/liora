@@ -55,6 +55,21 @@ fn sanitize_duplicate_parameters(parameter_list: &str) -> String {
     sanitized.join(", ")
 }
 
+fn init_dynamic_function_metadata(
+    dynamic_index: usize,
+    parameter_count: usize,
+    ctx: &mut BuiltinContext,
+) {
+    ctx.heap.set_dynamic_function_prop(
+        dynamic_index,
+        "name",
+        Value::String("anonymous".to_string()),
+    );
+    let clamped_length = parameter_count.min(i32::MAX as usize) as i32;
+    ctx.heap
+        .set_dynamic_function_prop(dynamic_index, "length", Value::Int(clamped_length));
+}
+
 pub fn function_constructor(
     args: &[Value],
     ctx: &mut BuiltinContext,
@@ -92,6 +107,7 @@ pub fn function_constructor(
             init_entry: None,
             global_funcs,
         };
+        let parameter_count = 0usize;
         return match interpret_program_with_heap(
             &program, ctx.heap, false, None, false, false, None,
         ) {
@@ -101,7 +117,9 @@ pub fn function_constructor(
                 {
                     ctx.heap.dynamic_chunks.push(inner_chunk.clone());
                     ctx.heap.dynamic_captures.push(Vec::new());
-                    return Ok(Value::DynamicFunction(ctx.heap.dynamic_chunks.len() - 1));
+                    let dynamic_index = ctx.heap.dynamic_chunks.len() - 1;
+                    init_dynamic_function_metadata(dynamic_index, parameter_count, ctx);
+                    return Ok(Value::DynamicFunction(dynamic_index));
                 }
                 Ok(v)
             }
@@ -169,6 +187,7 @@ pub fn function_constructor(
         init_entry: None,
         global_funcs,
     };
+    let parameter_count = params.len();
     match interpret_program_with_heap(&program, ctx.heap, false, None, false, false, None) {
         Ok(Completion::Return(v)) => {
             if let Value::Function(inner_idx) = v
@@ -176,12 +195,35 @@ pub fn function_constructor(
             {
                 ctx.heap.dynamic_chunks.push(inner_chunk.clone());
                 ctx.heap.dynamic_captures.push(Vec::new());
-                return Ok(Value::DynamicFunction(ctx.heap.dynamic_chunks.len() - 1));
+                let dynamic_index = ctx.heap.dynamic_chunks.len() - 1;
+                init_dynamic_function_metadata(dynamic_index, parameter_count, ctx);
+                return Ok(Value::DynamicFunction(dynamic_index));
             }
             Ok(v)
         }
         Ok(Completion::Throw(v)) => Err(BuiltinError::Throw(v)),
         Ok(Completion::Normal(v)) => Ok(v),
         Err(e) => Err(BuiltinError::Throw(Value::String(e.to_string()))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn function_constructor_sets_name_and_length() {
+        let result = crate::driver::Driver::run_to_string(
+            "function main() { var f = Function('a', 'b', 'return a + b;'); return f.name + ':' + f.length; }",
+        )
+        .expect("run");
+        assert_eq!(result, "anonymous:2");
+    }
+
+    #[test]
+    fn function_constructor_default_length_is_zero() {
+        let result = crate::driver::Driver::run_to_string(
+            "function main() { var f = Function('return 1;'); return f.name + ':' + f.length; }",
+        )
+        .expect("run");
+        assert_eq!(result, "anonymous:0");
     }
 }

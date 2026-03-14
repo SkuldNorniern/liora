@@ -53,6 +53,7 @@ pub struct Heap {
     pub generator_states: Vec<GeneratorState>,
     pub promises: Vec<PromiseRecord>,
     eval_scope_bindings: Vec<(String, Value)>,
+    eval_outer_chunks: Vec<BytecodeChunk>,
 }
 
 impl Default for Heap {
@@ -83,6 +84,7 @@ impl Default for Heap {
             generator_states: Vec::new(),
             promises: Vec::new(),
             eval_scope_bindings: Vec::new(),
+            eval_outer_chunks: Vec::new(),
         };
         heap.init_globals();
         heap

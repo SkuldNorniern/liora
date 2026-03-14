@@ -1,25 +1,6 @@
 use super::{BuiltinContext, BuiltinError};
 use crate::runtime::Value;
 
-fn is_callable(value: &Value, heap: &crate::runtime::Heap) -> bool {
-    match value {
-        Value::Function(_)
-        | Value::DynamicFunction(_)
-        | Value::Builtin(_)
-        | Value::BoundBuiltin(_, _, _)
-        | Value::BoundFunction(_, _, _) => true,
-        Value::Object(object_id) => matches!(
-            heap.get_prop(*object_id, "__call__"),
-            Value::Function(_)
-                | Value::DynamicFunction(_)
-                | Value::Builtin(_)
-                | Value::BoundBuiltin(_, _, _)
-                | Value::BoundFunction(_, _, _)
-        ),
-        _ => false,
-    }
-}
-
 fn iterator_constructor_id(ctx: &BuiltinContext) -> Option<usize> {
     let iterator_ctor = ctx.heap.get_global("Iterator");
     let Value::Object(iterator_ctor_id) = iterator_ctor else {
@@ -112,7 +93,7 @@ pub fn wrap_for_from(value: Value, ctx: &mut BuiltinContext) -> Result<Value, Bu
     }
 
     let next_method = ctx.heap.get_prop(iterator_object_id, "next");
-    if !is_callable(&next_method, ctx.heap) {
+    if !super::is_callable_value(&next_method, ctx.heap) {
         return Err(BuiltinError::Throw(Value::String(
             "TypeError: object is not iterable".to_string(),
         )));
@@ -156,7 +137,7 @@ pub fn wrap_next(args: &[Value], ctx: &mut BuiltinContext) -> Result<Value, Buil
         )));
     };
     let next_method = ctx.heap.get_prop(wrapper_id, "__iter_wrapped_next");
-    if !is_callable(&next_method, ctx.heap) {
+    if !super::is_callable_value(&next_method, ctx.heap) {
         return Err(BuiltinError::Throw(Value::String(
             "TypeError: iterator.next is not callable".to_string(),
         )));
@@ -190,7 +171,7 @@ pub fn wrap_return(args: &[Value], ctx: &mut BuiltinContext) -> Result<Value, Bu
     if matches!(return_method, Value::Undefined) {
         return Ok(iterator_result_object(ctx, Value::Undefined, true));
     }
-    if !is_callable(&return_method, ctx.heap) {
+    if !super::is_callable_value(&return_method, ctx.heap) {
         return Err(BuiltinError::Throw(Value::String(
             "TypeError: iterator.return is not callable".to_string(),
         )));
@@ -222,7 +203,7 @@ pub fn prototype_dispose(args: &[Value], ctx: &mut BuiltinContext) -> Result<Val
     if matches!(return_method, Value::Undefined) {
         return Ok(Value::Undefined);
     }
-    if !is_callable(&return_method, ctx.heap) {
+    if !super::is_callable_value(&return_method, ctx.heap) {
         return Err(BuiltinError::Throw(Value::String(
             "TypeError: iterator.return is not callable".to_string(),
         )));
@@ -461,14 +442,14 @@ pub fn get_iterator(args: &[Value], ctx: &mut BuiltinContext) -> Result<Value, B
         Value::Object(obj_id) => {
             let iterator_method = ctx.heap.get_prop(obj_id, "Symbol.iterator");
             if !matches!(iterator_method, Value::Undefined | Value::Null)
-                && !is_callable(&iterator_method, ctx.heap)
+                && !super::is_callable_value(&iterator_method, ctx.heap)
             {
                 return Err(BuiltinError::Throw(Value::String(
                     "TypeError: object is not iterable".to_string(),
                 )));
             }
             let next_method = ctx.heap.get_prop(obj_id, "next");
-            if !is_callable(&next_method, ctx.heap) {
+            if !super::is_callable_value(&next_method, ctx.heap) {
                 return Err(BuiltinError::Throw(Value::String(
                     "TypeError: object is not iterable".to_string(),
                 )));

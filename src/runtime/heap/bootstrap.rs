@@ -967,6 +967,11 @@ impl Heap {
             "apply",
             Value::Builtin(b("Function", "apply")),
         );
+        self.set_prop(
+            func_proto_id,
+            "toString",
+            Value::Builtin(b("Function", "toString")),
+        );
         let func_id = self.alloc_object();
         self.set_prop(func_id, "prototype", Value::Object(func_proto_id));
         self.set_prop(func_id, "__call__", Value::Builtin(b("Global", "Function")));

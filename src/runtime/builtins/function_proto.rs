@@ -1,40 +1,39 @@
 //! Function.prototype.call, bind, apply - required for propertyHelper and test262 harness.
 //! call invokes builtins with explicit this. apply supports Function, Builtin, DynamicFunction.
 
-use super::{BuiltinContext, BuiltinError, to_number};
+use super::{BuiltinContext, BuiltinError, is_callable_value, to_length};
 use crate::runtime::{Heap, Value};
 
-fn is_callable_value(value: &Value, heap: &Heap) -> bool {
+fn callable_name(value: &Value, heap: &Heap) -> String {
     match value {
-        Value::Function(_)
-        | Value::DynamicFunction(_)
-        | Value::BoundFunction(_, _, _)
-        | Value::Builtin(_)
-        | Value::BoundBuiltin(_, _, _) => true,
-        Value::Object(object_id) => matches!(
-            heap.get_prop(*object_id, "__call__"),
-            Value::Function(_)
-                | Value::DynamicFunction(_)
-                | Value::BoundFunction(_, _, _)
-                | Value::Builtin(_)
-                | Value::BoundBuiltin(_, _, _)
-        ),
-        _ => false,
+        Value::Builtin(id) => super::name(*id).to_string(),
+        Value::BoundBuiltin(_, _, _) | Value::BoundFunction(_, _, _) => "bound".to_string(),
+        Value::Function(function_index) => match heap.get_function_prop(*function_index, "name") {
+            Value::String(name) => name,
+            _ => String::new(),
+        },
+        Value::DynamicFunction(dynamic_index) => {
+            match heap.get_dynamic_function_prop(*dynamic_index, "name") {
+                Value::String(name) => name,
+                _ => String::new(),
+            }
+        }
+        Value::Object(object_id) => match heap.get_prop(*object_id, "name") {
+            Value::String(name) => name,
+            _ => String::new(),
+        },
+        _ => String::new(),
     }
 }
 
-fn array_like_to_values(arr: &Value, heap: &Heap) -> Vec<Value> {
+fn array_like_to_values(arr: &Value, heap: &Heap) -> Option<Vec<Value>> {
     let len = match arr {
         Value::Array(id) => heap.array_len(*id),
         Value::Object(id) => {
             let len_val = heap.get_prop(*id, "length");
-            let n = to_number(&len_val);
-            if !n.is_finite() || n < 0.0 {
-                return vec![];
-            }
-            n as usize
+            to_length(&len_val)
         }
-        _ => return vec![],
+        _ => return None,
     };
     let mut out = Vec::with_capacity(len);
     for i in 0..len {
@@ -46,7 +45,7 @@ fn array_like_to_values(arr: &Value, heap: &Heap) -> Vec<Value> {
         };
         out.push(val);
     }
-    out
+    Some(out)
 }
 
 pub fn function_call(args: &[Value], ctx: &mut BuiltinContext) -> Result<Value, BuiltinError> {
@@ -103,7 +102,11 @@ pub fn function_apply(args: &[Value], ctx: &mut BuiltinContext) -> Result<Value,
     let apply_args = if matches!(args_array, Value::Null | Value::Undefined) {
         vec![]
     } else {
-        array_like_to_values(&args_array, ctx.heap)
+        array_like_to_values(&args_array, ctx.heap).ok_or_else(|| {
+            BuiltinError::Throw(Value::String(
+                "TypeError: Function.prototype.apply argumentsList must be an object".to_string(),
+            ))
+        })?
     };
     Err(BuiltinError::Invoke {
         callee: target.clone(),
@@ -111,6 +114,22 @@ pub fn function_apply(args: &[Value], ctx: &mut BuiltinContext) -> Result<Value,
         args: apply_args,
         new_object: None,
     })
+}
+
+pub fn function_to_string(args: &[Value], ctx: &mut BuiltinContext) -> Result<Value, BuiltinError> {
+    let target = args.first().cloned().unwrap_or(Value::Undefined);
+    if !is_callable_value(&target, ctx.heap) {
+        return Err(BuiltinError::Throw(Value::String(
+            "TypeError: Function.prototype.toString target must be callable".to_string(),
+        )));
+    }
+    let name = callable_name(&target, ctx.heap);
+    let source = if name.is_empty() {
+        "function () { [native code] }".to_string()
+    } else {
+        format!("function {}() {{ [native code] }}", name)
+    };
+    Ok(Value::String(source))
 }
 
 pub fn function_bind(args: &[Value], ctx: &mut BuiltinContext) -> Result<Value, BuiltinError> {
@@ -296,5 +315,42 @@ mod tests {
         )
         .expect("run");
         assert_eq!(result, 5);
+    }
+
+    #[test]
+    fn function_apply_rejects_non_object_arguments_list() {
+        let mut heap = Heap::new();
+        let mut ctx = BuiltinContext { heap: &mut heap };
+        let join_id = resolve("Array", "join").expect("join");
+        let result = function_apply(
+            &[Value::Builtin(join_id), Value::Undefined, Value::Int(1)],
+            &mut ctx,
+        );
+        assert!(matches!(
+            result,
+            Err(BuiltinError::Throw(Value::String(msg)))
+                if msg.contains("argumentsList must be an object")
+        ));
+    }
+
+    #[test]
+    fn function_to_string_reports_native_code_for_builtin() {
+        let result = crate::driver::Driver::run(
+            "function main() { return Function.prototype.toString.call(Array.prototype.join).indexOf('[native code]') >= 0; }",
+        )
+        .expect("run");
+        assert_eq!(result, 1);
+    }
+
+    #[test]
+    fn function_to_string_rejects_non_callable_target() {
+        let mut heap = Heap::new();
+        let mut ctx = BuiltinContext { heap: &mut heap };
+        let result = function_to_string(&[Value::Int(1)], &mut ctx);
+        assert!(matches!(
+            result,
+            Err(BuiltinError::Throw(Value::String(msg)))
+                if msg.contains("target must be callable")
+        ));
     }
 }

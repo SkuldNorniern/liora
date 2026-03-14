@@ -1493,10 +1493,45 @@ impl Parser {
         let body = Box::new(self.parse_block()?);
         let (catch_param, catch_body) = if self.optional(TokenType::Catch) {
             if self.optional(TokenType::LeftParen) {
-                let param = self.expect(TokenType::Identifier)?.lexeme;
+                let (binding, binding_span) = self.parse_binding()?;
                 self.expect(TokenType::RightParen)?;
-                let catch = Box::new(self.parse_block()?);
-                (Some(param), Some(catch))
+                let catch_statement = self.parse_block()?;
+                match binding {
+                    Binding::Ident(param_name) => {
+                        (Some(param_name), Some(Box::new(catch_statement)))
+                    }
+                    pattern_binding => {
+                        let synthetic_param_name = format!("__catch_param_{}", self.next_id().0);
+                        let destructuring_declarator = VarDeclarator {
+                            id: self.next_id(),
+                            span: binding_span,
+                            binding: pattern_binding,
+                            init: Some(Box::new(Expression::Identifier(IdentifierExpr {
+                                id: self.next_id(),
+                                span: binding_span,
+                                name: synthetic_param_name.clone(),
+                            }))),
+                        };
+                        let destructuring_statement = Statement::LetDecl(LetDeclStmt {
+                            id: self.next_id(),
+                            span: binding_span,
+                            declarations: vec![destructuring_declarator],
+                        });
+
+                        let rewritten_catch = match catch_statement {
+                            Statement::Block(mut block_statement) => {
+                                block_statement.body.insert(0, destructuring_statement);
+                                Statement::Block(block_statement)
+                            }
+                            other_statement => Statement::Block(BlockStmt {
+                                id: self.next_id(),
+                                span: other_statement.span(),
+                                body: vec![destructuring_statement, other_statement],
+                            }),
+                        };
+                        (Some(synthetic_param_name), Some(Box::new(rewritten_catch)))
+                    }
+                }
             } else {
                 let catch = Box::new(self.parse_block()?);
                 (None, Some(catch))
@@ -4943,6 +4978,36 @@ mod tests {
             }
         }
         panic!("expected try/catch without param in block");
+    }
+
+    #[test]
+    fn parse_try_catch_pattern_binding() {
+        let script = parse_ok("function f() { try { throw {}; } catch ({ e }) { return e; } }");
+        if let Statement::FunctionDecl(f) = &script.body[0]
+            && let Statement::Block(b) = &*f.body
+            && let Statement::Try(t) = &b.body[0]
+        {
+            let Some(catch_param_name) = t.catch_param.as_deref() else {
+                panic!("expected synthetic catch parameter name");
+            };
+            assert!(catch_param_name.starts_with("__catch_param_"));
+
+            let Some(catch_body) = &t.catch_body else {
+                panic!("expected catch body");
+            };
+            if let Statement::Block(catch_block) = catch_body.as_ref() {
+                if let Statement::LetDecl(let_declaration) = &catch_block.body[0]
+                    && let Some(first_declarator) = let_declaration.declarations.first()
+                {
+                    assert!(matches!(
+                        first_declarator.binding,
+                        Binding::ObjectPattern(_)
+                    ));
+                    return;
+                }
+            }
+        }
+        panic!("expected rewritten catch pattern binding");
     }
 
     #[test]
