@@ -138,19 +138,26 @@ fn is_iteration(stmt: &Statement) -> bool {
     )
 }
 
-fn is_forbidden_single_statement_declaration(stmt: &Statement) -> bool {
+fn is_forbidden_single_statement_declaration(
+    stmt: &Statement,
+    allow_function_declaration: bool,
+) -> bool {
     match stmt {
-        Statement::LetDecl(_)
-        | Statement::ConstDecl(_)
-        | Statement::ClassDecl(_)
-        | Statement::FunctionDecl(_) => true,
-        Statement::Labeled(l) => is_forbidden_single_statement_declaration(&l.body),
+        Statement::LetDecl(_) | Statement::ConstDecl(_) | Statement::ClassDecl(_) => true,
+        Statement::FunctionDecl(_) => !allow_function_declaration,
+        Statement::Labeled(l) => {
+            is_forbidden_single_statement_declaration(&l.body, allow_function_declaration)
+        }
         _ => false,
     }
 }
 
-fn check_single_statement_context(stmt: &Statement, errors: &mut Vec<EarlyError>) {
-    if is_forbidden_single_statement_declaration(stmt) {
+fn check_single_statement_context(
+    stmt: &Statement,
+    allow_function_declaration: bool,
+    errors: &mut Vec<EarlyError>,
+) {
+    if is_forbidden_single_statement_declaration(stmt, allow_function_declaration) {
         errors.push(EarlyError {
             code: ErrorCode::EarlyStrictReserved,
             message: "declaration not allowed in single-statement context".to_string(),
@@ -396,7 +403,7 @@ fn check_statement(
             scope.leave_block();
         }
         Statement::Labeled(l) => {
-            check_single_statement_context(&l.body, errors);
+            check_single_statement_context(&l.body, !ctx.strict, errors);
             let mut new_ctx = ctx.clone();
             if is_iteration(&l.body) {
                 new_ctx.iter_labels.push(l.label.clone());
@@ -619,16 +626,16 @@ fn check_statement(
         }
         Statement::If(i) => {
             check_expression(&i.condition, scope, ctx, errors);
-            check_single_statement_context(&i.then_branch, errors);
+            check_single_statement_context(&i.then_branch, !ctx.strict, errors);
             check_statement(&i.then_branch, scope, ctx, errors);
             if let Some(else_b) = &i.else_branch {
-                check_single_statement_context(else_b, errors);
+                check_single_statement_context(else_b, !ctx.strict, errors);
                 check_statement(else_b, scope, ctx, errors);
             }
         }
         Statement::With(w) => {
             check_expression(&w.object, scope, ctx, errors);
-            check_single_statement_context(&w.body, errors);
+            check_single_statement_context(&w.body, false, errors);
             if ctx.strict {
                 errors.push(EarlyError {
                     code: ErrorCode::EarlyStrictReserved,
@@ -640,7 +647,7 @@ fn check_statement(
         }
         Statement::While(w) => {
             check_expression(&w.condition, scope, ctx, errors);
-            check_single_statement_context(&w.body, errors);
+            check_single_statement_context(&w.body, false, errors);
             let iter_ctx = CheckContext {
                 in_function: ctx.in_function,
                 in_iteration: true,
@@ -654,7 +661,7 @@ fn check_statement(
         }
         Statement::DoWhile(d) => {
             check_expression(&d.condition, scope, ctx, errors);
-            check_single_statement_context(&d.body, errors);
+            check_single_statement_context(&d.body, false, errors);
             let iter_ctx = CheckContext {
                 in_function: ctx.in_function,
                 in_iteration: true,
@@ -677,7 +684,7 @@ fn check_statement(
             if let Some(update) = &f.update {
                 check_expression(update, scope, ctx, errors);
             }
-            check_single_statement_context(&f.body, errors);
+            check_single_statement_context(&f.body, false, errors);
             let iter_ctx = CheckContext {
                 in_function: ctx.in_function,
                 in_iteration: true,
@@ -741,7 +748,7 @@ fn check_statement(
                 }
                 ForInOfLeft::Identifier(_) | ForInOfLeft::Pattern(_) => {}
             }
-            check_single_statement_context(&f.body, errors);
+            check_single_statement_context(&f.body, false, errors);
             let iter_ctx = CheckContext {
                 in_function: ctx.in_function,
                 in_iteration: true,
@@ -805,7 +812,7 @@ fn check_statement(
                 }
                 ForInOfLeft::Identifier(_) | ForInOfLeft::Pattern(_) => {}
             }
-            check_single_statement_context(&f.body, errors);
+            check_single_statement_context(&f.body, false, errors);
             let iter_ctx = CheckContext {
                 in_function: ctx.in_function,
                 in_iteration: true,
@@ -1071,6 +1078,40 @@ mod tests {
         assert!(
             errs.iter()
                 .any(|e| e.message.contains("'with' is not allowed"))
+        );
+    }
+
+    #[test]
+    fn check_annex_b_if_function_declaration_allowed_in_sloppy_mode() {
+        let r = parse_and_check("if (true) function f() {} else function g() {}");
+        assert!(r.is_ok());
+    }
+
+    #[test]
+    fn check_annex_b_if_function_declaration_rejected_in_strict_mode() {
+        let r = parse_and_check("'use strict'; if (true) function f() {}");
+        assert!(r.is_err());
+        let errs = r.unwrap_err();
+        assert!(
+            errs.iter()
+                .any(|e| e.message.contains("single-statement context"))
+        );
+    }
+
+    #[test]
+    fn check_annex_b_labeled_function_declaration_allowed_in_sloppy_mode() {
+        let r = parse_and_check("label: function f() {}");
+        assert!(r.is_ok());
+    }
+
+    #[test]
+    fn check_annex_b_labeled_function_declaration_rejected_in_strict_mode() {
+        let r = parse_and_check("'use strict'; label: function f() {}");
+        assert!(r.is_err());
+        let errs = r.unwrap_err();
+        assert!(
+            errs.iter()
+                .any(|e| e.message.contains("single-statement context"))
         );
     }
 }

@@ -1,6 +1,6 @@
 use super::Heap;
 use crate::ir::bytecode::BytecodeChunk;
-use crate::runtime::Value;
+use crate::runtime::{DynamicCapture, Value};
 use std::collections::HashMap;
 
 impl Heap {
@@ -26,6 +26,28 @@ impl Heap {
 
     pub fn eval_outer_chunk(&self, function_index: usize) -> Option<&BytecodeChunk> {
         self.eval_outer_chunks.get(function_index)
+    }
+
+    pub fn alloc_dynamic_function_with_captures(
+        &mut self,
+        chunk: BytecodeChunk,
+        captures: Vec<DynamicCapture>,
+    ) -> usize {
+        let dynamic_function_index = self.dynamic_chunks.len();
+        self.dynamic_chunks.push(chunk);
+        if dynamic_function_index < self.dynamic_captures.len() {
+            self.dynamic_captures[dynamic_function_index] = captures;
+        } else {
+            self.dynamic_captures.push(captures);
+        }
+        dynamic_function_index
+    }
+
+    pub fn dynamic_captures_slice(&self, dynamic_function_index: usize) -> &[DynamicCapture] {
+        self.dynamic_captures
+            .get(dynamic_function_index)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
     }
 
     pub fn get_function_prop(&self, func_index: usize, key: &str) -> Value {

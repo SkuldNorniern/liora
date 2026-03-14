@@ -274,12 +274,8 @@ fn promote_program_function_to_dynamic(
         return Value::Function(function_index);
     };
 
-    let dynamic_index = heap.dynamic_chunks.len();
-    heap.dynamic_chunks.push(function_chunk.clone());
-    if heap.dynamic_captures.len() <= dynamic_index {
-        heap.dynamic_captures.resize(dynamic_index + 1, Vec::new());
-    }
-    heap.dynamic_captures[dynamic_index] = Vec::new();
+    let dynamic_index =
+        heap.alloc_dynamic_function_with_captures(function_chunk.clone(), Vec::new());
 
     for function_key in heap.function_keys(function_index) {
         let function_value = heap.get_function_prop(function_index, &function_key);
@@ -1058,12 +1054,10 @@ pub fn interpret_program_with_heap_and_entry(
                                     });
                                 }
                             }
-                            let dynamic_index = heap.dynamic_chunks.len();
-                            heap.dynamic_chunks.push(callee_chunk.clone());
-                            if heap.dynamic_captures.len() <= dynamic_index {
-                                heap.dynamic_captures.resize(dynamic_index + 1, Vec::new());
-                            }
-                            heap.dynamic_captures[dynamic_index] = captured_slots;
+                            let dynamic_index = heap.alloc_dynamic_function_with_captures(
+                                callee_chunk.clone(),
+                                captured_slots,
+                            );
                             Value::DynamicFunction(dynamic_index)
                         }
                     }
@@ -1121,12 +1115,10 @@ pub fn interpret_program_with_heap_and_entry(
                                     });
                                 }
                             }
-                            let dynamic_index = heap.dynamic_chunks.len();
-                            heap.dynamic_chunks.push(callee_chunk.clone());
-                            if heap.dynamic_captures.len() <= dynamic_index {
-                                heap.dynamic_captures.resize(dynamic_index + 1, Vec::new());
-                            }
-                            heap.dynamic_captures[dynamic_index] = captured_slots;
+                            let dynamic_index = heap.alloc_dynamic_function_with_captures(
+                                callee_chunk.clone(),
+                                captured_slots,
+                            );
                             Value::DynamicFunction(dynamic_index)
                         }
                     }
@@ -1836,18 +1828,13 @@ pub fn interpret_program_with_heap_and_entry(
                             setup_dynamic_function_locals(&callee_chunk, &args, heap_idx, heap);
                         let num_locals = callee_locals.len();
                         let stack_base = state.stack.len();
-                        let captured: Vec<DynamicCapture> = heap
-                            .dynamic_captures
-                            .get(heap_idx)
-                            .cloned()
-                            .unwrap_or_default();
                         state.stack.extend(callee_locals);
-                        for capture in captured {
+                        for capture in heap.dynamic_captures_slice(heap_idx) {
                             state.set_local_at(
                                 stack_base,
                                 num_locals,
                                 capture.inner_slot as usize,
-                                capture.value,
+                                capture.value.clone(),
                             );
                         }
                         state.chunks_stack.push(Rc::new(callee_chunk));
@@ -2195,18 +2182,13 @@ pub fn interpret_program_with_heap_and_entry(
                             setup_dynamic_function_locals(&callee_chunk, &args, heap_idx, heap);
                         let num_locals = callee_locals.len();
                         let stack_base = state.stack.len();
-                        let captured: Vec<DynamicCapture> = heap
-                            .dynamic_captures
-                            .get(heap_idx)
-                            .cloned()
-                            .unwrap_or_default();
                         state.stack.extend(callee_locals);
-                        for capture in captured {
+                        for capture in heap.dynamic_captures_slice(heap_idx) {
                             state.set_local_at(
                                 stack_base,
                                 num_locals,
                                 capture.inner_slot as usize,
-                                capture.value,
+                                capture.value.clone(),
                             );
                         }
                         state.chunks_stack.push(Rc::new(callee_chunk));
@@ -2922,18 +2904,13 @@ fn handle_apply_invoke(
                     setup_dynamic_function_locals(&callee_chunk, &args, *heap_idx, heap);
                 let num_locals = callee_locals.len();
                 let stack_base = state.stack.len();
-                let captured: Vec<DynamicCapture> = heap
-                    .dynamic_captures
-                    .get(*heap_idx)
-                    .cloned()
-                    .unwrap_or_default();
                 state.stack.extend(callee_locals);
-                for capture in captured {
+                for capture in heap.dynamic_captures_slice(*heap_idx) {
                     state.set_local_at(
                         stack_base,
                         num_locals,
                         capture.inner_slot as usize,
-                        capture.value,
+                        capture.value.clone(),
                     );
                 }
                 state.chunks_stack.push(Rc::new(callee_chunk));
@@ -3212,14 +3189,9 @@ fn create_generator_state(
     this_value: Value,
 ) -> usize {
     let mut locals = setup_dynamic_function_locals(chunk, args, dyn_index, heap);
-    let captured: Vec<DynamicCapture> = heap
-        .dynamic_captures
-        .get(dyn_index)
-        .cloned()
-        .unwrap_or_default();
-    for capture in captured {
+    for capture in heap.dynamic_captures_slice(dyn_index) {
         if (capture.inner_slot as usize) < locals.len() {
-            locals[capture.inner_slot as usize] = capture.value;
+            locals[capture.inner_slot as usize] = capture.value.clone();
         }
     }
     let gs = crate::runtime::GeneratorState {

@@ -142,6 +142,18 @@ fn collect_function_exprs_stmt(stmt: &Statement, out: &mut Vec<(NodeId, Function
         }
         Statement::Labeled(l) => collect_function_exprs_stmt(&l.body, out),
         Statement::FunctionDecl(f) => {
+            out.push((
+                f.id,
+                FunctionExprData {
+                    id: f.id,
+                    span: f.span,
+                    name: Some(f.name.clone()),
+                    params: f.params.clone(),
+                    body: f.body.clone(),
+                    is_generator: f.is_generator,
+                    is_async: f.is_async,
+                },
+            ));
             collect_function_exprs_stmt(&f.body, out);
         }
         Statement::If(i) => {
@@ -562,6 +574,8 @@ pub fn script_to_hir(script: &Script) -> Result<Vec<HirFunction>, LowerError> {
         let mut nested_funcs = Vec::new();
         let hir = compile_function(
             f,
+            base,
+            false,
             &func_index_comp,
             &func_expr_map_comp,
             Some(&mut nested_funcs),
@@ -716,6 +730,19 @@ fn named_locals_from_map(locals: &HashMap<String, u32>) -> Vec<(String, u32)> {
         .collect();
     named_locals.sort_by_key(|(_, slot)| *slot);
     named_locals
+}
+
+fn visible_outer_binding_names(ctx: &LowerCtx<'_>) -> Vec<String> {
+    let mut binding_names: Vec<String> = ctx.locals.keys().cloned().collect();
+    for outer_binding_name in &ctx.outer_binding_names {
+        if !binding_names
+            .iter()
+            .any(|existing_binding_name| existing_binding_name == outer_binding_name)
+        {
+            binding_names.push(outer_binding_name.clone());
+        }
+    }
+    binding_names
 }
 
 fn get_or_alloc_capture_slot(ctx: &mut LowerCtx<'_>, name: &str) -> Option<u32> {
@@ -1555,6 +1582,8 @@ fn emit_param_preamble(
 
 fn compile_function(
     f: &FunctionDeclStmt,
+    self_function_index: u32,
+    use_local_function_name_binding: bool,
     func_index: &HashMap<String, u32>,
     func_expr_map: &HashMap<NodeId, u32>,
     functions: Option<&mut Vec<HirFunction>>,
@@ -1612,6 +1641,21 @@ fn compile_function(
         ctx.locals.insert("arguments".to_string(), ctx.next_slot);
         ctx.next_slot += 1;
     }
+    if use_local_function_name_binding {
+        let function_name_slot = *ctx.locals.entry(f.name.clone()).or_insert_with(|| {
+            let slot = ctx.next_slot;
+            ctx.next_slot += 1;
+            slot
+        });
+        ctx.blocks[ctx.current_block].ops.push(HirOp::LoadConst {
+            value: HirConst::Function(self_function_index),
+            span,
+        });
+        ctx.blocks[ctx.current_block].ops.push(HirOp::StoreLocal {
+            id: function_name_slot,
+            span,
+        });
+    }
     let mut hoisted_var_names = Vec::new();
     collect_hoisted_var_names_from_statement(&f.body, &mut hoisted_var_names);
     for hoisted_var_name in hoisted_var_names {
@@ -1650,9 +1694,26 @@ fn compile_function(
     })
 }
 
+fn wrap_annex_b_function_clause(stmt: &Statement, strict: bool) -> Option<Statement> {
+    if strict {
+        return None;
+    }
+    if matches!(stmt, Statement::FunctionDecl(_)) {
+        return Some(Statement::Block(BlockStmt {
+            id: NodeId(0),
+            span: stmt.span(),
+            body: vec![stmt.clone()],
+        }));
+    }
+    None
+}
+
 fn compile_statement(stmt: &Statement, ctx: &mut LowerCtx<'_>) -> Result<bool, LowerError> {
     match stmt {
         Statement::Labeled(l) => {
+            if let Some(wrapped_body) = wrap_annex_b_function_clause(&l.body, ctx.strict) {
+                return compile_statement(&wrapped_body, ctx);
+            }
             let is_loop = matches!(
                 l.body.as_ref(),
                 Statement::For(_)
@@ -1675,62 +1736,85 @@ fn compile_statement(stmt: &Statement, ctx: &mut LowerCtx<'_>) -> Result<bool, L
             let mut block_func_index = get_func_index(ctx).clone();
             let mut hit_return = false;
             let mut taken_functions = ctx.functions.take();
-            let mut preallocated_block_functions: Vec<(&FunctionDeclStmt, u32, usize)> = Vec::new();
+            let mut preallocated_block_functions: Vec<(&FunctionDeclStmt, u32, Option<usize>)> =
+                Vec::new();
 
-            if let Some(functions) = taken_functions.as_mut() {
-                for statement in &b.body {
-                    if let Statement::FunctionDecl(nested_function) = statement {
-                        let placeholder_index = functions.len();
-                        let function_index = ctx.functions_base + placeholder_index as u32;
+            for statement in &b.body {
+                if let Statement::FunctionDecl(nested_function) = statement {
+                    let mut placeholder_index = None;
+                    let function_index = if let Some(functions) = taken_functions.as_mut() {
+                        let allocated_placeholder_index = functions.len();
+                        let allocated_function_index =
+                            ctx.functions_base + allocated_placeholder_index as u32;
                         functions.push(hir_placeholder());
-                        block_func_index.insert(nested_function.name.clone(), function_index);
-                        let _ = ctx
-                            .locals
-                            .entry(nested_function.name.clone())
-                            .or_insert_with(|| {
-                                let slot = ctx.next_slot;
-                                ctx.next_slot += 1;
-                                slot
-                            });
-                        preallocated_block_functions.push((
-                            nested_function,
-                            function_index,
-                            placeholder_index,
+                        placeholder_index = Some(allocated_placeholder_index);
+                        allocated_function_index
+                    } else if let Some(mapped_function_index) =
+                        ctx.func_expr_map.get(&nested_function.id)
+                    {
+                        *mapped_function_index
+                    } else {
+                        return Err(LowerError::Unsupported(
+                            format!(
+                                "function declaration '{}' is not in function index map",
+                                nested_function.name
+                            ),
+                            Some(nested_function.span),
                         ));
-                    }
+                    };
+
+                    block_func_index.insert(nested_function.name.clone(), function_index);
+                    let _ = ctx
+                        .locals
+                        .entry(nested_function.name.clone())
+                        .or_insert_with(|| {
+                            let slot = ctx.next_slot;
+                            ctx.next_slot += 1;
+                            slot
+                        });
+                    preallocated_block_functions.push((
+                        nested_function,
+                        function_index,
+                        placeholder_index,
+                    ));
                 }
             }
 
             for (nested, function_index, placeholder_index) in &preallocated_block_functions {
-                let outer_binding_names: Vec<String> = ctx.locals.keys().cloned().collect();
-                if let Some(functions) = taken_functions.as_mut() {
-                    let hir = compile_function(
-                        nested,
-                        &block_func_index,
-                        ctx.func_expr_map,
-                        Some(functions),
-                        ctx.functions_base,
-                        Some(outer_binding_names),
-                        Some(ctx.with_binding_names.clone()),
-                        ctx.strict,
-                    )?;
-                    let nested_captures: Vec<String> = hir.captured_names.clone();
-                    functions[*placeholder_index] = hir;
-                    for captured in nested_captures {
-                        if !ctx.locals.contains_key(&captured) {
-                            get_or_alloc_capture_slot(ctx, &captured);
+                if let Some(placeholder_index) = placeholder_index {
+                    let outer_binding_names = visible_outer_binding_names(ctx);
+                    if let Some(functions) = taken_functions.as_mut() {
+                        let hir = compile_function(
+                            nested,
+                            *function_index,
+                            true,
+                            &block_func_index,
+                            ctx.func_expr_map,
+                            Some(functions),
+                            ctx.functions_base,
+                            Some(outer_binding_names),
+                            Some(ctx.with_binding_names.clone()),
+                            ctx.strict,
+                        )?;
+                        let nested_captures: Vec<String> = hir.captured_names.clone();
+                        functions[*placeholder_index] = hir;
+                        for captured in nested_captures {
+                            if !ctx.locals.contains_key(&captured) {
+                                get_or_alloc_capture_slot(ctx, &captured);
+                            }
                         }
                     }
-                    let slot = ctx.locals[&nested.name];
-                    ctx.blocks[ctx.current_block].ops.push(HirOp::LoadConst {
-                        value: HirConst::Function(*function_index),
-                        span: nested.span,
-                    });
-                    ctx.blocks[ctx.current_block].ops.push(HirOp::StoreLocal {
-                        id: slot,
-                        span: nested.span,
-                    });
                 }
+
+                let slot = ctx.locals[&nested.name];
+                ctx.blocks[ctx.current_block].ops.push(HirOp::LoadConst {
+                    value: HirConst::Function(*function_index),
+                    span: nested.span,
+                });
+                ctx.blocks[ctx.current_block].ops.push(HirOp::StoreLocal {
+                    id: slot,
+                    span: nested.span,
+                });
             }
 
             for s in &b.body {
@@ -1984,7 +2068,9 @@ fn compile_statement(stmt: &Statement, ctx: &mut LowerCtx<'_>) -> Result<bool, L
             };
 
             ctx.current_block = then_id as usize;
-            let then_returns = compile_statement(&i.then_branch, ctx)?;
+            let wrapped_then = wrap_annex_b_function_clause(&i.then_branch, ctx.strict);
+            let then_statement = wrapped_then.as_ref().unwrap_or(i.then_branch.as_ref());
+            let then_returns = compile_statement(then_statement, ctx)?;
             ctx.blocks[ctx.current_block].terminator = if then_returns {
                 terminator_for_exit(ctx)
             } else {
@@ -1993,7 +2079,9 @@ fn compile_statement(stmt: &Statement, ctx: &mut LowerCtx<'_>) -> Result<bool, L
 
             ctx.current_block = else_id as usize;
             let else_returns = if let Some(ref else_b) = i.else_branch {
-                compile_statement(else_b, ctx)?
+                let wrapped_else = wrap_annex_b_function_clause(else_b, ctx.strict);
+                let else_statement = wrapped_else.as_ref().unwrap_or(else_b);
+                compile_statement(else_statement, ctx)?
             } else {
                 false
             };
@@ -3412,7 +3500,7 @@ fn compile_function_expr(fe: &FunctionExprData, ctx: &mut LowerCtx<'_>) -> Resul
             ctx.func_expr_map,
             Some(&mut taken_funcs),
             ctx.functions_base,
-            Some(ctx.locals.keys().cloned().collect()),
+            Some(visible_outer_binding_names(ctx)),
             Some(ctx.with_binding_names.clone()),
             ctx.strict,
         )?;
@@ -9396,6 +9484,127 @@ mod tests {
         assert_eq!(
             result, 11,
             "function expression should capture outer local variable"
+        );
+    }
+
+    #[test]
+    fn lower_annex_b_iife_collects_outer_capture_names() {
+        let mut parser = Parser::new(
+            "function main() {
+                function __test__() {
+                    var initialBV, currentBV, varBinding;
+                    (function() {
+                        if (true) function f() { initialBV = f; f = 123; currentBV = f; return 'decl'; }
+                        varBinding = f;
+                        f();
+                    }());
+                    return 0;
+                }
+                return __test__();
+            }",
+        );
+        let script = parser.parse().expect("parse");
+        let funcs = script_to_hir(&script).expect("lower");
+        let has_iife_capture = funcs.iter().any(|function| {
+            function.name.is_none()
+                && function
+                    .captured_names
+                    .iter()
+                    .any(|captured_name| captured_name == "varBinding")
+        });
+        assert!(
+            has_iife_capture,
+            "expected IIFE to capture varBinding from outer function"
+        );
+    }
+
+    #[test]
+    fn lower_annex_b_iife_bytecode_keeps_outer_capture_names() {
+        let mut parser = Parser::new(
+            "function main() {
+                function __test__() {
+                    var initialBV, currentBV, varBinding;
+                    (function() {
+                        if (true) function f() { initialBV = f; f = 123; currentBV = f; return 'decl'; }
+                        varBinding = f;
+                        f();
+                    }());
+                    return 0;
+                }
+                return __test__();
+            }",
+        );
+        let script = parser.parse().expect("parse");
+        let hir_functions = script_to_hir(&script).expect("lower");
+        let compiled_functions = crate::ir::compile_functions(&hir_functions);
+        let test_chunk_has_var_binding_local = compiled_functions.iter().any(|compiled_function| {
+            if compiled_function.name.as_deref() != Some("__test__") {
+                return false;
+            }
+            compiled_function
+                .chunk
+                .named_locals
+                .iter()
+                .find(|(local_name, _)| local_name == "varBinding")
+                .is_some_and(|(_, slot)| *slot < compiled_function.chunk.num_locals)
+        });
+        assert!(
+            test_chunk_has_var_binding_local,
+            "expected __test__ chunk to have varBinding local slot"
+        );
+        let has_iife_capture = compiled_functions.iter().any(|compiled_function| {
+            compiled_function.name.is_none()
+                && compiled_function
+                    .chunk
+                    .captured_names
+                    .iter()
+                    .any(|captured_name| captured_name == "varBinding")
+                && compiled_function
+                    .chunk
+                    .captured_names
+                    .iter()
+                    .any(|captured_name| captured_name == "initialBV")
+                && compiled_function
+                    .chunk
+                    .captured_names
+                    .iter()
+                    .any(|captured_name| captured_name == "currentBV")
+                && compiled_function
+                    .chunk
+                    .named_locals
+                    .iter()
+                    .any(|(local_name, _)| local_name == "varBinding")
+        });
+        assert!(
+            has_iife_capture,
+            "expected IIFE bytecode chunk to capture varBinding from outer function"
+        );
+    }
+
+    #[test]
+    fn lower_annex_b_iife_block_scoping_propagates_outer_bindings() {
+        let result = crate::driver::Driver::run(
+            "function main() {
+                function __test__() {
+                    var initialBV, currentBV, varBinding;
+                    (function() {
+                        if (true) function f() { initialBV = f; f = 123; currentBV = f; return 'decl'; }
+                        varBinding = f;
+                        f();
+                    }());
+                    if (typeof varBinding !== 'function') return 10;
+                    if (typeof initialBV !== 'function') return 20;
+                    if (currentBV !== 123) return 30;
+                    if (varBinding() !== 'decl') return 40;
+                    return 1;
+                }
+                return __test__();
+            }",
+        )
+        .expect("run");
+        assert_eq!(
+            result, 1,
+            "IIFE should update outer bindings for Annex B block-scoped function semantics"
         );
     }
 
